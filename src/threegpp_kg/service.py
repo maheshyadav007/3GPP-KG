@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+from collections import Counter
+from datetime import UTC, datetime
+from typing import Any
+
+from .constants import Conclusion
+from .domain import (
+    Envelope,
+    NewsletterPacket,
+    Passage,
+    SearchFilters,
+    SearchRequest,
+    TDoc,
+    TDocDetail,
+    TemporalScope,
+)
+from .models.client import ModelEndpointError, OpenAICompatibleClient
+from .repository import InMemoryRepository, Repository, decode_cursor, encode_cursor
+
+
+class KnowledgeService:
+    def __init__(
+        self,
+        repository: Repository,
+        embedding_client: OpenAICompatibleClient | None = None,
+        rerank_client: OpenAICompatibleClient | None = None,
+    ) -> None:
+        self.repository = repository
+        self.embedding_client = embedding_client
+        self.rerank_client = rerank_client
+
+    async def list_meetings(
+        self,
+        working_groups: list[str],
+        request: SearchRequest,
+    ) -> Envelope[list[dict[str, Any]]]:
+        meetings, cursor = await self.repository.list_meetings(working_groups, request)
+        version = await self.repository.active_dataset_version()
+        return Envelope(
+            data=[meeting.model_dump(mode="json") for meeting in meetings],
+            dataset_version=version,
+            next_cursor=cursor,
+        )
+
+    async def search_tdocs(self, request: SearchRequest) -> Envelope[list[TDoc]]:
+        tdocs, cursor = await self.repository.search_tdocs(request)
+        evidence_ids = list(dict.fromkeys(eid for tdoc in tdocs for eid in tdoc.evidence_ids))
+        evidence = await self.repository.evidence(evidence_ids)
+        version = await self.repository.active_dataset_version()
+        return Envelope(data=tdocs, evidence=evidence, dataset_version=version, next_cursor=cursor)
+
+    async def get_tdoc(self, tdoc_id: str) -> Envelope[TDoc | None]:
+        tdoc = await self.repository.get_tdoc(tdoc_id)
+        evidence = await self.repository.evidence(tdoc.evidence_ids if tdoc else [])
+        version = await self.repository.active_dataset_version()
+        return Envelope(
+            data=tdoc,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if tdoc else "unavailable",
+            confidence=1.0 if tdoc else 0.0,
+            warnings=[] if tdoc else [f"TDoc {tdoc_id} was not found"],
+        )
+
+    async def get_tdoc_detail(
+        self,
+        tdoc_id: str,
+        *,
+        block_limit: int = 500,
+        cursor: str | None = None,
+        start_block: int | None = None,
+    ) -> Envelope[TDocDetail | None]:
+        base = await self.get_tdoc(tdoc_id)
+        if base.data is None:
+            return Envelope(
+                data=None,
+                evidence=base.evidence,
+                dataset_version=base.dataset_version,
+                completeness=base.completeness,
+                confidence=base.confidence,
+                warnings=base.warnings,
+            )
+        if cursor and start_block is not None:
+            raise ValueError("cursor and start_block are mutually exclusive")
+        offset = start_block if start_block is not None else decode_cursor(cursor)
+        blocks = await self.repository.document_blocks(
+            base.data.id,
+            offset=offset,
+            limit=block_limit + 1,
+        )
+        has_more = len(blocks) > block_limit
+        blocks = blocks[:block_limit]
+        return Envelope(
+            data=TDocDetail(tdoc=base.data, blocks=blocks),
+            evidence=base.evidence,
+            dataset_version=base.dataset_version,
+            completeness="partial" if has_more or not blocks else "complete",
+            confidence=base.confidence,
+            warnings=(
+                ["Additional document blocks are available"]
+                if has_more
+                else ([] if blocks else ["TDoc body has not been ingested"])
+            ),
+            next_cursor=encode_cursor(offset + block_limit) if has_more else None,
+        )
+
+    async def document_section_tree(
+        self,
+        tdoc_id: str,
+        *,
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> Envelope[list[dict[str, Any]]]:
+        base = await self.get_tdoc(tdoc_id)
+        if base.data is None:
+            return Envelope(
+                data=[],
+                evidence=base.evidence,
+                dataset_version=base.dataset_version,
+                completeness="unavailable",
+                confidence=0.0,
+                warnings=base.warnings,
+            )
+        offset = decode_cursor(cursor)
+        section_tree = await self.repository.document_section_tree(base.data.id)
+        page = section_tree[offset : offset + limit]
+        has_more = offset + limit < len(section_tree)
+        return Envelope(
+            data=[entry.model_dump(mode="json") for entry in page],
+            evidence=base.evidence,
+            dataset_version=base.dataset_version,
+            completeness="partial" if has_more else ("complete" if page else "unavailable"),
+            confidence=base.confidence if page else 0.0,
+            warnings=[] if page else ["TDoc section tree is unavailable"],
+            next_cursor=encode_cursor(offset + limit) if has_more else None,
+        )
+
+    async def relevant_passages(
+        self,
+        query: str,
+        *,
+        tdoc_ids: list[str] | None = None,
+        meeting_ids: list[str] | None = None,
+        top_k: int = 10,
+        query_embedding: list[float] | None = None,
+    ) -> Envelope[list[Passage]]:
+        warnings: list[str] = []
+        if query_embedding is None and self.embedding_client and query.strip():
+            try:
+                query_embedding = (await self.embedding_client.embeddings([query]))[0]
+            except (ModelEndpointError, OSError, TimeoutError):
+                warnings.append("Semantic retrieval failed; lexical retrieval was used")
+        passages = await self.repository.search_passages(
+            query,
+            tdoc_ids=tdoc_ids or [],
+            meeting_ids=meeting_ids or [],
+            top_k=top_k,
+            query_embedding=query_embedding,
+        )
+        if self.rerank_client and passages:
+            try:
+                ranked = await self.rerank_client.rerank(
+                    query, [passage.text for passage in passages]
+                )
+                passages = [passages[index] for index, _ in ranked]
+            except (ModelEndpointError, OSError, TimeoutError):
+                warnings.append("Reranking failed; hybrid order was retained")
+        evidence_ids = list(
+            dict.fromkeys(identifier for passage in passages for identifier in passage.evidence_ids)
+        )
+        evidence = await self.repository.evidence(evidence_ids)
+        version = await self.repository.active_dataset_version()
+        return Envelope(
+            data=passages,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if passages else "unavailable",
+            confidence=max((passage.score for passage in passages), default=0.0),
+            warnings=warnings
+            if passages
+            else [*warnings, "No evidence-bearing passages matched the query"],
+        )
+
+    async def revision_chain(self, tdoc_id: str) -> Envelope[list[str]]:
+        if isinstance(self.repository, InMemoryRepository):
+            chain = self.repository.revision_chain(tdoc_id)
+        else:
+            chain = await self._revision_chain_generic(tdoc_id)
+        chain_tdocs = [await self.repository.get_tdoc(identifier) for identifier in chain]
+        evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for tdoc in chain_tdocs
+                if tdoc is not None
+                for evidence_id in tdoc.evidence_ids
+            )
+        )
+        evidence = await self.repository.evidence(evidence_ids)
+        version = await self.repository.active_dataset_version()
+        return Envelope(
+            data=chain,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if chain else "unavailable",
+            confidence=1.0 if chain else 0.0,
+            warnings=[] if evidence or not chain else ["Revision chain has no source evidence"],
+        )
+
+    async def _revision_chain_generic(self, tdoc_id: str) -> list[str]:
+        current = await self.repository.get_tdoc(tdoc_id)
+        if not current:
+            return []
+        seen: set[str] = set()
+        while current.revised_from and current.id not in seen:
+            seen.add(current.id)
+            previous = await self.repository.get_tdoc(current.revised_from)
+            if not previous:
+                break
+            current = previous
+        chain: list[str] = []
+        seen.clear()
+        while current.id not in seen:
+            seen.add(current.id)
+            chain.append(current.id)
+            if not current.revised_to:
+                break
+            following = await self.repository.get_tdoc(current.revised_to)
+            if not following:
+                break
+            current = following
+        return chain
+
+    async def newsletter_packet(
+        self, meeting_id: str, edition: str = "provisional"
+    ) -> Envelope[NewsletterPacket | None]:
+        if edition not in {"provisional", "final"}:
+            raise ValueError("edition must be provisional or final")
+        meeting_request = SearchRequest(
+            filters=SearchFilters(temporal=TemporalScope(meeting_ids=[meeting_id])), top_k=1
+        )
+        meetings, _ = await self.repository.list_meetings([], meeting_request)
+        version = await self.repository.active_dataset_version()
+        if not meetings:
+            return Envelope(
+                data=None,
+                dataset_version=version,
+                completeness="unavailable",
+                confidence=0,
+                warnings=[f"Meeting {meeting_id} was not found"],
+            )
+        tdocs, _ = await self.repository.search_tdocs(
+            SearchRequest(
+                filters=SearchFilters(temporal=TemporalScope(meeting_ids=[meeting_id])),
+                top_k=100,
+            )
+        )
+        status_groups: dict[str, list[TDoc]] = {}
+        for status in Conclusion:
+            selected = [tdoc for tdoc in tdocs if tdoc.status == status]
+            if selected:
+                status_groups[status.value] = selected
+        companies: Counter[str] = Counter()
+        topics: Counter[str] = Counter()
+        specs: Counter[str] = Counter()
+        revision_chains: list[list[str]] = []
+        for tdoc in tdocs:
+            companies.update(part.strip() for part in tdoc.source.split(",") if part.strip())
+            if tdoc.agenda_description:
+                topics[tdoc.agenda_description] += 1
+            specs.update(tdoc.specifications)
+            if tdoc.revised_to:
+                revision_chains.append([tdoc.id, tdoc.revised_to])
+        evidence_ids = list(dict.fromkeys(eid for tdoc in tdocs for eid in tdoc.evidence_ids))
+        missing_evidence = [tdoc.id for tdoc in tdocs if not tdoc.evidence_ids]
+        packet = NewsletterPacket(
+            meeting=meetings[0],
+            edition="final" if edition == "final" else "provisional",
+            generated_at=datetime.now(UTC),
+            totals={"tdocs": len(tdocs), **dict(Counter(tdoc.status.value for tdoc in tdocs))},
+            decisions=status_groups,
+            hot_topics=[
+                {"topic": key, "tdoc_count": value} for key, value in topics.most_common(10)
+            ],
+            company_activity=[
+                {"company": key, "tdoc_count": value} for key, value in companies.most_common(10)
+            ],
+            revision_chains=revision_chains,
+            affected_specs=[
+                {"specification": key, "tdoc_count": value} for key, value in specs.most_common()
+            ],
+            evidence_ids=evidence_ids,
+        )
+        evidence = await self.repository.evidence(evidence_ids)
+        warnings: list[str] = []
+        if edition == "final" and meetings[0].readiness != "final_ready":
+            warnings.append("Final report evidence is not yet available")
+        if missing_evidence:
+            warnings.append(
+                f"{len(missing_evidence)} TDocs do not have evidence and cannot be published"
+            )
+        complete = not warnings
+        return Envelope(
+            data=packet,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if complete else "partial",
+            confidence=(len(tdocs) - len(missing_evidence)) / len(tdocs) if tdocs else 0,
+            warnings=warnings,
+        )

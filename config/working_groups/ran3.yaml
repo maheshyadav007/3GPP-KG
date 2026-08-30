@@ -1,0 +1,17 @@
+id: RAN3
+name: RAN Working Group 3
+tsg: RAN
+root_url: https://www.3gpp.org/ftp/tsg_ran/WG3_Iu/
+meeting_pattern: '^TSGR3_(?P<number>\d+)(?P<variant>-?bis(?:[-_]e)?|[-_]e)?$'
+tdoc_prefix: R3
+directories:
+  agenda: [Agenda]
+  documents: [Docs]
+  reports: [Report]
+  tdoc_lists: [TdocList, Docs]
+artifact_patterns:
+  agenda_csv: '(?i)agenda\.csv$'
+  tdoc_list: '(?i)(tdocList|TDoc_List).*\.(xlsx|zip)$'
+  tdoc: '(?i)R3-[0-9]+\.zip$'
+  report: '(?i)R3-[0-9]+\.zip$'
+validation_meetings: [TSGR3_132, TSGR3_131, TSGR3_130, TSGR3_120]

@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: threegpp
+      POSTGRES_USER: threegpp
+      POSTGRES_PASSWORD: local-development-only
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U threegpp"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  api:
+    build: .
+    environment:
+      THREEGPP_DATABASE_MODE: sql
+      THREEGPP_DATABASE_URL: postgresql+asyncpg://threegpp:local-development-only@postgres:5432/threegpp
+      THREEGPP_OBJECT_STORE_BACKEND: local
+      THREEGPP_OBJECT_STORE_LOCAL_PATH: /var/lib/threegpp/artifacts
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - artifact-data:/var/lib/threegpp/artifacts
+
+volumes:
+  postgres-data:
+  artifact-data:

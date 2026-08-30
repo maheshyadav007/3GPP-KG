@@ -1,0 +1,21 @@
+id: SA2
+name: SA Working Group 2
+tsg: SA
+root_url: https://www.3gpp.org/ftp/tsg_sa/WG2_Arch/
+meeting_pattern: '^TSGS2_(?P<number>\d+)(?P<variant>-?AHE|-?AH-e|bis(?:-e)?|[-_]e)?(?:_.*)?$'
+tdoc_prefix: S2
+directories:
+  agenda: [Agenda]
+  documents: [Docs]
+  reports: [Report, Approved_Reports]
+  tdoc_lists: ['.']
+artifact_patterns:
+  agenda_csv: '(?i)agenda\.csv$'
+  tdoc_list: '(?i)(Index|TdocsByAgenda).*\.(xlsx|zip)$'
+  tdoc: '(?i)S2-[0-9]+\.zip$'
+  report: '(?i)(Report|S2-[0-9]+).*\.zip$'
+validation_meetings:
+  - TSGS2_172_Dallas_2025-11
+  - TSGS2_171_Wuhan_2025-10
+  - TSGS2_170_Goteborg_2025-08
+  - TSGS2_160_Chicago_2023-11

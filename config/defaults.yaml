@@ -1,0 +1,106 @@
+app:
+  name: 3GPP Evidence Graph
+  environment: development
+  log_level: INFO
+database:
+  mode: fixture
+  url: sqlite+aiosqlite:///./threegpp-dev.db
+  preview_dataset_version: null
+  echo: false
+  pool_size: 20
+  max_overflow: 30
+object_store:
+  backend: local
+  local_path: ./data/artifacts
+  endpoint: null
+  bucket: threegpp-artifacts
+  region: us-east-1
+http:
+  user_agent: 3gpp-evidence-graph/0.1 (internal research; contact administrator)
+  timeout_seconds: 30
+  retries: 4
+  requests_per_second: 20.0
+  max_concurrency: 20
+  max_download_bytes: 104857600
+  max_archive_members: 200
+  max_archive_uncompressed_bytes: 524288000
+ingestion:
+  history_months: 24
+  active_poll_minutes: 120
+  recent_poll_minutes: 360
+  historical_poll_minutes: 10080
+  job_lease_seconds: 900
+  max_attempts: 5
+evidence_blocks:
+  target_tokens: 1000
+  max_tokens: 1400
+chunking:
+  min_tokens: 300
+  target_tokens: 500
+  max_tokens: 700
+  neighbor_blocks: 1
+parsers:
+  max_workbook_rows: 100000
+  max_document_blocks: 75000
+  max_archive_members: 200
+  max_archive_uncompressed_bytes: 524288000
+  max_archive_depth: 1
+  document_workers: 10
+  reject_macros: true
+  legacy_converter: auto
+  legacy_conversion_timeout_seconds: 60
+  max_converted_bytes: 104857600
+retrieval:
+  default_last_k_meetings: 3
+  default_top_k: 10
+  max_top_k: 100
+  graph_hops: 2
+  rrf_k: 60
+  vector_weight: 1.0
+  lexical_weight: 1.0
+models:
+  timeout_seconds: 60
+  retries: 2
+  embedding:
+    provider: openai_compatible
+    base_url: null
+    model: null
+    dimensions: 1024
+    api_key: null
+    batch_size: 32
+  rerank:
+    provider: openai_compatible
+    base_url: null
+    model: null
+    api_key: null
+    batch_size: 32
+  generation:
+    provider: openai_compatible
+    base_url: null
+    model: null
+    api_key: null
+features:
+  topic_extraction_enabled: false
+  newsletter_generation_enabled: false
+  topic_min_confidence: 0.65
+graph:
+  default_node_limit: 300
+  max_node_limit: 1000
+  max_edges: 5000
+  document_block_page_size: 500
+  max_document_block_page_size: 2000
+  document_section_page_size: 200
+  max_document_section_page_size: 1000
+security:
+  allowed_source_hosts:
+    - www.3gpp.org
+    - portal.3gpp.org
+  oidc_issuer: null
+  oidc_audience: threegpp-evidence-graph
+  auth_required: false
+  cors_origins:
+    - http://localhost:3000
+observability:
+  service_name: threegpp-evidence-graph
+  json_logs: true
+  metrics_enabled: true

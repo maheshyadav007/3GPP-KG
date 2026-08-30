@@ -1,0 +1,22 @@
+id: CT1
+name: Core Network and Terminals Working Group 1
+tsg: CT
+root_url: https://www.3gpp.org/ftp/tsg_ct/WG1_mm-cc-sm_ex-CN1/
+meeting_pattern: '^TSGC1_(?P<number>\d+)(?P<variant>-?bis(?:[-_]e)?|[-_]?e)?(?:_.*)?$'
+tdoc_prefix: C1
+directories:
+  agenda: [Agenda]
+  documents: [Docs]
+  reports: [Report, Reports]
+  tdoc_lists: [Docs]
+  invitations: [Invitation]
+artifact_patterns:
+  agenda_csv: '(?i)agenda\.csv$'
+  tdoc_list: '(?i)TDoc_List_Meeting_CT1.*\.(xlsx|zip)$'
+  tdoc: '(?i)C1-[0-9]+\.zip$'
+  report: '(?i)(Report|C1-[0-9]+).*\.zip$'
+validation_meetings:
+  - TSGC1_162_Prague
+  - TSGC1_161_Dalian
+  - TSGC1_160_Malta
+  - TSGC1_152_Orlando

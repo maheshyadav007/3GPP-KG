@@ -1,0 +1,105 @@
+[project]
+name = "threegpp-evidence-graph"
+version = "0.1.0"
+description = "Evidence-first temporal knowledge graph and MCP server for 3GPP meetings"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "alembic>=1.14,<2",
+  "asyncpg>=0.30,<1",
+  "beautifulsoup4>=4.12,<5",
+  "boto3>=1.35,<2",
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "mcp>=1.18,<2",
+  "openpyxl>=3.1,<4",
+  "pgvector>=0.3,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "pypdf>=5,<7",
+  "python-docx>=1.1,<2",
+  "pyjwt[crypto]>=2.10,<3",
+  "pyyaml>=6,<7",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "tenacity>=9,<10",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[dependency-groups]
+dev = [
+  "aiosqlite>=0.20,<1",
+  "coverage[toml]>=7.6,<8",
+  "hypothesis>=6.120,<7",
+  "mypy>=1.14,<2",
+  "mutmut>=3.3,<4",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<7",
+  "respx>=0.22,<1",
+  "ruff>=0.9,<1",
+  "types-openpyxl>=3.1,<4",
+  "types-pyyaml>=6,<7",
+]
+
+[project.scripts]
+threegpp-kg = "threegpp_kg.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/threegpp_kg"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"config" = "threegpp_kg/config_files"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "integration: requires local infrastructure",
+  "live: accesses an external 3GPP or model endpoint",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["threegpp_kg"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 85
+exclude_also = ["if TYPE_CHECKING:", "if __name__ == .__main__.:"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "mutants", "mutants-baseline", "web"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["threegpp_kg"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["boto3", "botocore.exceptions"]
+ignore_missing_imports = true
+
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = [
+  "src/threegpp_kg/graph.py",
+  "src/threegpp_kg/ingestion/normalize.py",
+  "src/threegpp_kg/newsletter.py",
+  "src/threegpp_kg/retrieval.py",
+  "src/threegpp_kg/topics.py",
+]
+pytest_add_cli_args_test_selection = ["tests"]
+also_copy = ["config/"]
+use_git_change_detection = false
