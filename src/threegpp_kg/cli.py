@@ -9,6 +9,7 @@ import uvicorn
 
 from .backfill import BackfillRequest, run_backfill
 from .config import load_settings, load_working_groups
+from .graph_repair import rebuild_graph
 from .local_ingest import ingest_local_manifests
 from .mirror import benchmark_download_concurrency, mirror_working_group
 from .publisher import activate_dataset, assess_activation_readiness
@@ -71,6 +72,11 @@ def main() -> None:
     )
     activate.add_argument("--dataset-version", required=True)
     activate.add_argument("--output", type=Path)
+    rebuild = subparsers.add_parser(
+        "rebuild-graph", help="rebuild an inactive dataset graph from canonical TDoc membership"
+    )
+    rebuild.add_argument("--dataset-version", required=True)
+    rebuild.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -187,6 +193,14 @@ def main() -> None:
         print(json.dumps(result, indent=2, sort_keys=True))
         if not result["activated"]:
             raise SystemExit(1)
+    elif args.command == "rebuild-graph":
+        result = asyncio.run(_rebuild_existing_graph(args.dataset_version))
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        print(json.dumps(result, indent=2, sort_keys=True))
 
 
 async def _activate_existing_dataset(dataset_version_id: str) -> dict[str, object]:
@@ -202,6 +216,20 @@ async def _activate_existing_dataset(dataset_version_id: str) -> dict[str, objec
             await activate_dataset(session, dataset_version_id)
             await session.commit()
             return {**assessment, "activated": True}
+    finally:
+        await engine.dispose()
+
+
+async def _rebuild_existing_graph(dataset_version_id: str) -> dict[str, object]:
+    settings = load_settings()
+    if settings.database.mode != "sql" or not settings.database.url.startswith("postgresql+"):
+        raise ValueError("graph rebuilding requires database.mode=sql with PostgreSQL")
+    engine, sessions = create_engine_and_session(settings.database)
+    try:
+        async with sessions() as session:
+            result = await rebuild_graph(session, dataset_version_id)
+            await session.commit()
+            return result
     finally:
         await engine.dispose()
 

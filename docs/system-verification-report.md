@@ -65,6 +65,38 @@ documents and on report/date completeness for CT1-162 and RAN3-133. The corpus r
 accounting and deterministic ingestion behavior; it does not satisfy the expert retrieval,
 relationship-accuracy, network load, security review, or live newsletter-model release gates.
 
+## Incremental verification: complete single-meeting graph
+
+- Verification date: 2026-08-30
+- Candidate dataset: `latest5-all-wgs-20260830-v2`
+- Graph rebuild proof: [`graph-rebuild.json`](../artifacts/test-runs/20260830T023807Z/graph-rebuild.json)
+- Scope: canonical graph repair, complete single-meeting projection, meeting facets, and the
+  single-meeting Sigma.js UI
+
+| Check | Result | Classification |
+|---|---:|---|
+| Canonical graph rebuild | 20 meetings; 24,705 TDocs; 31,888 nodes; 172,688 edges | READY WITH LIMITATIONS |
+| Containment reconciliation | Every meeting containment count equals its canonical TDoc count; 0 cross-meeting containment edges | READY |
+| Largest exercised UI meeting (`SA2-173`) | 3,198 TDocs; 4,045 nodes; 18,951 edges; no truncation | [`ui-complete-sa2-173.jpg`](../artifacts/test-runs/20260830T023807Z/ui-complete-sa2-173.jpg) |
+| Live complete-graph API | HTTP 200 in 0.954 seconds; 843 KB compressed response | READY WITH LIMITATIONS |
+| Meeting-specific autocomplete | `eri` ranked Ericsson first with 414 matching TDocs | READY |
+| Filtered projection | Ericsson filter returned 414 TDocs, 664 nodes, and 3,837 edges | READY |
+| Deterministic Python suite | 159 passed; 1 optional PostgreSQL test skipped | PASS |
+| Isolated PostgreSQL integration | 1 passed against `threegpp_test` after all migrations | PASS |
+| Frontend component suite | 3 passed | PASS |
+| Static/build checks | Ruff, strict mypy for 39 files, ESLint, and production build passed | PASS |
+
+The rebuild is atomic and idempotent for inactive datasets. Ingestion now refuses to create graph
+facts for a TDoc canonically owned by another meeting. The complete endpoint retains typed node IDs,
+edge evidence IDs, exact visible and total counts, and contextual boundary nodes for revision
+predecessors. It rejects meetings above the configured 15,000-node or 75,000-edge ceiling instead
+of returning a partial graph.
+
+The browser exercised meeting selection, full SA2-173 rendering, autocomplete, immediate filtering,
+and the wider cited TDoc reader. ForceAtlas2 runs in a worker and interactions remained available
+during layout. Desktop rendering was visually checked. The responsive reader is covered by CSS and
+component behavior, but a narrow-screen browser screenshot was not captured in this run.
+
 ## Readiness conclusion
 
 **Overall status: NOT READY for production.**
@@ -118,7 +150,7 @@ evidence, retrieval, and publication modules meet or exceed 85% branch coverage.
 | Scheduler and publication | READY WITH LIMITATIONS | Idempotent jobs, leases, reclaim, retry and dead-letter pass component tests; atomic activation also passes PostgreSQL. Continuous operation is unverified. |
 | Deterministic newsletter packet | READY WITH LIMITATIONS | Evidence-backed packet generation and publication guards pass. Corpus-level usefulness has not been evaluated by domain experts. |
 | Newsletter prose generation | NOT READY | Frozen endpoint behavior passes; no live generative-model gate was run. The feature flag remains disabled. |
-| Graph UI/document reader | READY WITH LIMITATIONS | Search, filters, bounded projections, collapsed section navigation and direct block jumps are browser-verified. Dependency advisories and missing accessibility evidence block release. |
+| Graph UI/document reader | READY WITH LIMITATIONS | Complete single-meeting projections, meeting-scoped autocomplete, worker layout, section navigation and the resizable reader are browser/component-verified. Dependency advisories, narrow-screen screenshot evidence and formal accessibility evidence remain open. |
 | Backup, restore and disaster recovery | READY WITH LIMITATIONS | Local `pg_dump`/`pg_restore` passed. Full-corpus filesystem snapshot, point-in-time recovery and disaster drill remain unverified. |
 
 ## Requirement-to-test traceability

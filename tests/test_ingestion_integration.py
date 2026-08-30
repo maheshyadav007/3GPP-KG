@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from threegpp_kg.config import ChunkingConfig
 from threegpp_kg.constants import DatasetState
 from threegpp_kg.domain import Meeting, SearchFilters, SearchRequest, TemporalScope
+from threegpp_kg.graph_repair import rebuild_graph
 from threegpp_kg.ingestion.download import DownloadedArtifact
 from threegpp_kg.ingestion.pipeline import (
     ingest_document_artifact,
@@ -270,4 +271,62 @@ async def test_idempotent_ingestion_document_blocks_and_atomic_activation(tmp_pa
     packet = await service.newsletter_packet("RAN2-133", "final")
     assert packet.data and packet.data.totals["tdocs"] == 2
     assert packet.completeness == "complete"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_graph_ownership_guard_and_rebuild_are_idempotent(tmp_path) -> None:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    first = Meeting(
+        id="RAN2-133",
+        working_group_id="RAN2",
+        number=133,
+        name="RAN2 #133",
+        source_url="https://www.3gpp.org/133",
+        readiness="final_ready",
+    )
+    later = first.model_copy(
+        update={
+            "id": "RAN2-134",
+            "number": 134,
+            "name": "RAN2 #134",
+            "source_url": "https://www.3gpp.org/134",
+        }
+    )
+    store = LocalObjectStore(tmp_path / "objects")
+    workbook = artifact(
+        "https://www.3gpp.org/TDoc_List.xlsx",
+        workbook_bytes(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    async with sessions() as session:
+        await ingest_tdoc_workbook(session, store, "candidate", first, "first.xlsx", workbook)
+        await ingest_tdoc_workbook(session, store, "candidate", later, "later.xlsx", workbook)
+        await session.commit()
+    async with sessions() as session:
+        later_contains = await session.scalar(
+            select(func.count(KnowledgeEdgeRow.id)).where(
+                KnowledgeEdgeRow.dataset_version_id == "candidate",
+                KnowledgeEdgeRow.source_id == later.id,
+                KnowledgeEdgeRow.predicate == "contains",
+            )
+        )
+        assert later_contains == 0
+        first_result = await rebuild_graph(session, "candidate")
+        await session.commit()
+    async with sessions() as session:
+        second_result = await rebuild_graph(session, "candidate")
+        await session.commit()
+        contains = await session.scalar(
+            select(func.count(KnowledgeEdgeRow.id)).where(
+                KnowledgeEdgeRow.dataset_version_id == "candidate",
+                KnowledgeEdgeRow.predicate == "contains",
+            )
+        )
+        assert contains == 2
+        assert first_result["nodes"] == second_result["nodes"]
+        assert first_result["edges"] == second_result["edges"]
     await engine.dispose()

@@ -46,6 +46,12 @@ class Repository(Protocol):
 
     async def search_tdocs(self, request: SearchRequest) -> tuple[list[TDoc], str | None]: ...
 
+    async def meeting(self, meeting_id: str) -> Meeting | None: ...
+
+    async def meeting_tdocs(self, meeting_id: str) -> list[TDoc]: ...
+
+    async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]: ...
+
     async def get_tdoc(self, tdoc_id: str) -> TDoc | None: ...
 
     async def evidence(self, ids: list[str]) -> list[EvidenceRef]: ...
@@ -293,6 +299,51 @@ class SqlRepository:
         return [self._tdoc(row) for row in rows[: request.top_k]], encode_cursor(
             offset + request.top_k
         ) if more else None
+
+    async def meeting(self, meeting_id: str) -> Meeting | None:
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(MeetingRow).where(
+                    MeetingRow.dataset_version_id == version,
+                    func.lower(MeetingRow.id) == meeting_id.lower(),
+                )
+            )
+        return self._meeting(row) if row else None
+
+    async def meeting_tdocs(self, meeting_id: str) -> list[TDoc]:
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(TDocRow)
+                        .where(
+                            TDocRow.dataset_version_id == version,
+                            func.lower(TDocRow.meeting_id) == meeting_id.lower(),
+                        )
+                        .order_by(TDocRow.id)
+                    )
+                ).all()
+            )
+        return [self._tdoc(row) for row in rows]
+
+    async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]:
+        if not meeting_ids:
+            return {}
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            rows = (
+                await session.execute(
+                    select(TDocRow.meeting_id, func.count(TDocRow.row_id))
+                    .where(
+                        TDocRow.dataset_version_id == version,
+                        TDocRow.meeting_id.in_(meeting_ids),
+                    )
+                    .group_by(TDocRow.meeting_id)
+                )
+            ).all()
+        return {meeting_id: int(count) for meeting_id, count in rows}
 
     async def get_tdoc(self, tdoc_id: str) -> TDoc | None:
         version = await self.active_dataset_version()
@@ -669,6 +720,21 @@ class InMemoryRepository:
             ]
         values.sort(key=lambda item: item.id)
         return self._page(values, request)
+
+    async def meeting(self, meeting_id: str) -> Meeting | None:
+        return next(
+            (item for item in self.meetings if item.id.casefold() == meeting_id.casefold()), None
+        )
+
+    async def meeting_tdocs(self, meeting_id: str) -> list[TDoc]:
+        return sorted(
+            (item for item in self.tdocs if item.meeting_id.casefold() == meeting_id.casefold()),
+            key=lambda item: item.id,
+        )
+
+    async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]:
+        selected = set(meeting_ids)
+        return dict(Counter(item.meeting_id for item in self.tdocs if item.meeting_id in selected))
 
     def _temporal_meeting_ids(self, filters: SearchFilters) -> set[str] | None:
         search_filters = filters

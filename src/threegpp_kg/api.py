@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.routing import Mount
 
 from .config import load_settings
@@ -84,6 +85,7 @@ def create_app(
         allow_methods=["GET", "POST"],
         allow_headers=["Authorization", "Content-Type", "Mcp-Session-Id"],
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
     if settings.security.auth_required:
         validator = token_validator or OidcTokenValidator(settings.security)
         app.add_middleware(OidcAuthMiddleware, validator=validator)
@@ -135,14 +137,69 @@ def create_app(
     @app.get("/api/meetings")
     async def list_meetings(
         working_group: Annotated[list[str] | None, Query()] = None,
-        last_k_meetings: int | None = Query(default=3, ge=1),
+        last_k_meetings: int | None = Query(default=None, ge=1),
+        limit: int = Query(default=100, ge=1, le=100),
     ) -> JSONResponse:
-        result = await knowledge.list_meetings(
+        result = await knowledge.meeting_summaries(
             working_group or [],
             SearchRequest(
-                filters=SearchFilters(temporal=TemporalScope(last_k_meetings=last_k_meetings))
+                filters=SearchFilters(temporal=TemporalScope(last_k_meetings=last_k_meetings)),
+                top_k=limit,
             ),
         )
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.get("/api/meetings/{meeting_id}/graph")
+    async def meeting_graph(
+        meeting_id: str,
+        query: str = "",
+        company_ids: Annotated[list[str] | None, Query()] = None,
+        topic_ids: Annotated[list[str] | None, Query()] = None,
+        specification_ids: Annotated[list[str] | None, Query()] = None,
+        match_mode: MatchMode = MatchMode.ALL,
+    ) -> JSONResponse:
+        result = await knowledge.meeting_graph(
+            meeting_id,
+            query=query,
+            company_ids=company_ids,
+            topic_ids=topic_ids,
+            specification_ids=specification_ids,
+            match_mode=match_mode,
+        )
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
+        counts = result.data["counts"]
+        if (
+            counts["nodes"] > settings.graph.max_meeting_nodes
+            or counts["edges"] > settings.graph.max_meeting_edges
+        ):
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "message": "complete meeting graph exceeds configured safety limits",
+                    "counts": counts,
+                    "max_nodes": settings.graph.max_meeting_nodes,
+                    "max_edges": settings.graph.max_meeting_edges,
+                },
+            )
+        if settings.database.preview_dataset_version:
+            result.warnings.append(
+                "Preview dataset is inactive; graph contents are complete for this dataset version."
+            )
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.get("/api/meetings/{meeting_id}/facets/{facet}")
+    async def meeting_facets(
+        meeting_id: str,
+        facet: str,
+        q: str = "",
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> JSONResponse:
+        if facet not in {"company", "topic", "specification"}:
+            raise HTTPException(status_code=422, detail="unsupported graph facet")
+        result = await knowledge.meeting_facets(meeting_id, facet, q, limit)  # type: ignore[arg-type]
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
         return JSONResponse(result.model_dump(mode="json"))
 
     @app.get("/api/graph")

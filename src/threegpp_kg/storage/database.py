@@ -124,6 +124,7 @@ class TDocRow(Base):
     __table_args__ = (
         UniqueConstraint("dataset_version_id", "id"),
         Index("ix_tdocs_title_source", "dataset_version_id", "status"),
+        Index("ix_tdocs_dataset_meeting_id", "dataset_version_id", "meeting_id", "id"),
     )
 
 
@@ -243,6 +244,19 @@ class KnowledgeEdgeRow(Base):
     __table_args__ = (
         UniqueConstraint(
             "dataset_version_id", "source_id", "predicate", "target_id", name="uq_edge_fact"
+        ),
+        Index(
+            "ix_edges_dataset_source",
+            "dataset_version_id",
+            "source_type",
+            "source_id",
+        ),
+        Index(
+            "ix_edges_dataset_target",
+            "dataset_version_id",
+            "predicate",
+            "target_id",
+            "source_id",
         ),
     )
 

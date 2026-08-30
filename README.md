@@ -75,6 +75,11 @@ uv run threegpp-kg serve
 In another terminal, run `cd web && npm run dev`, then open `http://localhost:3000`. The MCP
 Streamable HTTP endpoint is `http://localhost:8000/mcp`.
 
+The graph UI loads one complete meeting at a time. Choose the meeting first, then narrow its TDocs
+with company, topic, and specification autocomplete filters. Graph responses are never silently
+sampled: a meeting above the configured safety ceiling returns an explicit error. The document
+reader is resizable on desktop and opens as an overlay on narrower screens.
+
 On macOS, install and initialize the local database with:
 
 ```bash
@@ -129,6 +134,20 @@ THREEGPP_DATABASE_URL=postgresql+asyncpg://localhost:5432/threegpp \
   uv run threegpp-kg activate-dataset \
     --dataset-version latest5-all-wgs-20260830-v2
 ```
+
+If canonical TDoc ownership changes or a cumulative meeting spreadsheet previously contaminated
+meeting containment, rebuild an **inactive** dataset graph from canonical `tdocs.meeting_id` values:
+
+```bash
+THREEGPP_DATABASE_MODE=sql \
+THREEGPP_DATABASE_URL=postgresql+asyncpg://localhost:5432/threegpp \
+  uv run threegpp-kg rebuild-graph \
+    --dataset-version latest5-all-wgs-20260830-v2 \
+    --output artifacts/graph-rebuild.json
+```
+
+The command is idempotent and validates one `contains` edge per TDoc, endpoint integrity,
+deduplication, and absence of cross-meeting containment before committing the replacement graph.
 
 The current candidate is intentionally not active: two image-only CT1 PDFs require OCR, and the
 source has no published report for CT1-162 or RAN3-133. See the reconciliation artifact and

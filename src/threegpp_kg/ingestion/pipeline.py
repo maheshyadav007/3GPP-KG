@@ -265,13 +265,18 @@ async def ingest_tdoc_workbook(
         ]
     )
 
-    existing_tdocs = await _existing_tdoc_ids(
+    existing_tdocs = await _existing_tdoc_meetings(
         session, dataset_version_id, [tdoc.id for tdoc in tdocs]
     )
     session.add_all(
         [_tdoc_row(dataset_version_id, tdoc) for tdoc in tdocs if tdoc.id not in existing_tdocs]
     )
-    await _persist_tdoc_graph_batch(session, dataset_version_id, meeting, tdocs)
+    graph_tdocs = [
+        tdoc
+        for tdoc in tdocs
+        if existing_tdocs.get(tdoc.id) in {None, meeting.id}
+    ]
+    await persist_tdoc_graph_batch(session, dataset_version_id, meeting, graph_tdocs)
     await session.flush()
     return tdocs
 
@@ -285,19 +290,20 @@ async def _existing_evidence_ids(session: AsyncSession, identifiers: list[str]) 
     return existing
 
 
-async def _existing_tdoc_ids(
+async def _existing_tdoc_meetings(
     session: AsyncSession, dataset_version_id: str, identifiers: list[str]
-) -> set[str]:
-    existing: set[str] = set()
+) -> dict[str, str]:
+    existing: dict[str, str] = {}
     for batch in _batches(identifiers):
-        existing.update(
-            await session.scalars(
-                select(TDocRow.id).where(
+        rows = (
+            await session.execute(
+                select(TDocRow.id, TDocRow.meeting_id).where(
                     TDocRow.dataset_version_id == dataset_version_id,
                     TDocRow.id.in_(batch),
                 )
             )
-        )
+        ).all()
+        existing.update({identifier: meeting_id for identifier, meeting_id in rows})
     return existing
 
 
@@ -570,7 +576,7 @@ def _tdoc_row(dataset_version_id: str, tdoc: TDoc) -> TDocRow:
     )
 
 
-async def _persist_tdoc_graph_batch(
+async def persist_tdoc_graph_batch(
     session: AsyncSession,
     dataset_version_id: str,
     meeting: Meeting,

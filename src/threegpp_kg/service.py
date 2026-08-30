@@ -4,7 +4,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
-from .constants import Conclusion
+from .constants import Conclusion, MatchMode
 from .domain import (
     Envelope,
     NewsletterPacket,
@@ -15,6 +15,7 @@ from .domain import (
     TDocDetail,
     TemporalScope,
 )
+from .graph_view import FacetKind, build_graph, facet_options, filter_tdocs
 from .models.client import ModelEndpointError, OpenAICompatibleClient
 from .repository import InMemoryRepository, Repository, decode_cursor, encode_cursor
 
@@ -41,6 +42,86 @@ class KnowledgeService:
             data=[meeting.model_dump(mode="json") for meeting in meetings],
             dataset_version=version,
             next_cursor=cursor,
+        )
+
+    async def meeting_summaries(
+        self, working_groups: list[str], request: SearchRequest
+    ) -> Envelope[list[dict[str, Any]]]:
+        result = await self.list_meetings(working_groups, request)
+        counts = await self.repository.meeting_tdoc_counts([item["id"] for item in result.data])
+        return Envelope(
+            data=[{**item, "tdoc_count": counts.get(item["id"], 0)} for item in result.data],
+            dataset_version=result.dataset_version,
+            next_cursor=result.next_cursor,
+        )
+
+    async def meeting_graph(
+        self,
+        meeting_id: str,
+        *,
+        query: str = "",
+        company_ids: list[str] | None = None,
+        topic_ids: list[str] | None = None,
+        specification_ids: list[str] | None = None,
+        match_mode: MatchMode = MatchMode.ALL,
+    ) -> Envelope[dict[str, Any] | None]:
+        meeting = await self.repository.meeting(meeting_id)
+        version = await self.repository.active_dataset_version()
+        if meeting is None:
+            return Envelope(
+                data=None,
+                dataset_version=version,
+                completeness="unavailable",
+                confidence=0.0,
+                warnings=[f"Meeting {meeting_id} was not found"],
+            )
+        all_tdocs = await self.repository.meeting_tdocs(meeting.id)
+        selected = filter_tdocs(
+            all_tdocs,
+            query=query,
+            company_ids=company_ids or [],
+            topic_ids=topic_ids or [],
+            specification_ids=specification_ids or [],
+            match_mode=match_mode,
+        )
+        full_graph = build_graph(meeting, all_tdocs)
+        graph = full_graph if len(selected) == len(all_tdocs) else build_graph(meeting, selected)
+        evidence_ids = list(
+            dict.fromkeys(identifier for tdoc in selected for identifier in tdoc.evidence_ids)
+        )
+        return Envelope(
+            data={
+                "meeting": meeting.model_dump(mode="json"),
+                "nodes": graph["nodes"],
+                "edges": graph["edges"],
+                "counts": {
+                    "tdocs": len(selected),
+                    "nodes": len(graph["nodes"]),
+                    "edges": len(graph["edges"]),
+                    "total_tdocs": len(all_tdocs),
+                    "total_nodes": len(full_graph["nodes"]),
+                    "total_edges": len(full_graph["edges"]),
+                },
+                "match_mode": match_mode.value,
+            },
+            evidence=await self.repository.evidence(evidence_ids),
+            dataset_version=version,
+            completeness="complete",
+            confidence=1.0,
+        )
+
+    async def meeting_facets(
+        self, meeting_id: str, facet: FacetKind, query: str, limit: int
+    ) -> Envelope[list[dict[str, Any]]] | None:
+        meeting = await self.repository.meeting(meeting_id)
+        if meeting is None:
+            return None
+        values = facet_options(await self.repository.meeting_tdocs(meeting.id), facet, query, limit)
+        return Envelope(
+            data=values,
+            dataset_version=await self.repository.active_dataset_version(),
+            completeness="complete",
+            confidence=1.0,
         )
 
     async def search_tdocs(self, request: SearchRequest) -> Envelope[list[TDoc]]:

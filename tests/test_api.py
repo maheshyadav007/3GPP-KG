@@ -36,14 +36,14 @@ async def test_graph_is_bounded_and_contains_typed_nodes(service) -> None:
         response = await client.get("/api/graph", params={"query": "carrier", "limit": 20})
         assert response.status_code == 200
         body = response.json()
-        assert {node["type"] for node in body["data"]["nodes"]} == {
+        assert {
             "tdoc",
             "company",
             "topic",
             "meeting",
             "specification",
             "release",
-        }
+        } <= {node["type"] for node in body["data"]["nodes"]}
         node_ids = {node["id"] for node in body["data"]["nodes"]}
         assert all(
             edge["source"] in node_ids and edge["target"] in node_ids
@@ -78,6 +78,7 @@ async def test_search_meetings_newsletter_and_missing_document_routes(service) -
         )
         assert meetings.status_code == 200
         assert meetings.json()["data"][0]["id"] == "RAN2-133"
+        assert meetings.json()["data"][0]["tdoc_count"] == 3
 
         newsletter = await client.get("/api/newsletters/RAN2-133", params={"edition": "final"})
         assert newsletter.status_code == 200
@@ -85,3 +86,69 @@ async def test_search_meetings_newsletter_and_missing_document_routes(service) -
 
         assert (await client.get("/api/tdocs/missing")).status_code == 404
         assert (await client.get("/api/newsletters/missing")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_complete_meeting_graph_and_scoped_facets(service) -> None:
+    app = create_app(service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/meetings/RAN2-133/graph")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["completeness"] == "complete"
+        assert body["data"]["counts"]["tdocs"] == 3
+        assert body["data"]["counts"]["tdocs"] == body["data"]["counts"]["total_tdocs"]
+        node_types = {node["type"] for node in body["data"]["nodes"]}
+        assert {
+            "meeting",
+            "tdoc",
+            "organization",
+            "agenda_item",
+            "topic",
+            "specification",
+            "release",
+            "work_item",
+            "change_request",
+        } <= node_types
+        node_ids = {node["id"] for node in body["data"]["nodes"]}
+        assert all(
+            edge["source"] in node_ids and edge["target"] in node_ids
+            for edge in body["data"]["edges"]
+        )
+        boundary = next(node for node in body["data"]["nodes"] if node["id"] == "tdoc:R2-0")
+        assert boundary["boundary"] is True
+        assert body["evidence"][0]["id"] == "ev-1"
+
+        companies = await client.get(
+            "/api/meetings/RAN2-133/facets/company", params={"q": "er"}
+        )
+        assert companies.status_code == 200
+        assert companies.json()["data"] == [
+            {"id": "ericsson", "label": "Ericsson", "tdoc_count": 2}
+        ]
+        topics = await client.get("/api/meetings/RAN2-133/facets/topic")
+        assert topics.json()["data"][0]["label"] == "Carrier aggregation"
+
+        filtered = await client.get(
+            "/api/meetings/RAN2-133/graph",
+            params=[("company_ids", "ericsson"), ("specification_ids", "38.306")],
+        )
+        assert filtered.status_code == 200
+        assert filtered.json()["data"]["counts"]["tdocs"] == 1
+        assert filtered.json()["data"]["counts"]["total_tdocs"] == 3
+
+        any_filtered = await client.get(
+            "/api/meetings/RAN2-133/graph",
+            params=[
+                ("company_ids", "ericsson"),
+                ("specification_ids", "not-present"),
+                ("match_mode", "any"),
+            ],
+        )
+        assert any_filtered.json()["data"]["counts"]["tdocs"] == 2
+        assert (await client.get("/api/meetings/missing/graph")).status_code == 404
+        assert (
+            await client.get("/api/meetings/RAN2-133/facets/unsupported")
+        ).status_code == 422

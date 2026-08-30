@@ -148,6 +148,8 @@ class GraphConfig(BaseModel):
     default_node_limit: int = Field(300, ge=1)
     max_node_limit: int = Field(1000, ge=1)
     max_edges: int = Field(5000, ge=1)
+    max_meeting_nodes: int = Field(15_000, ge=1)
+    max_meeting_edges: int = Field(75_000, ge=1)
     document_block_page_size: int = Field(500, ge=1)
     max_document_block_page_size: int = Field(2000, ge=1)
     document_section_page_size: int = Field(200, ge=1)
