@@ -152,3 +152,51 @@ async def test_complete_meeting_graph_and_scoped_facets(service) -> None:
         assert (
             await client.get("/api/meetings/RAN2-133/facets/unsupported")
         ).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_complete_working_group_graph_resolves_cross_meeting_revisions(
+    multi_meeting_service,
+) -> None:
+    app = create_app(multi_meeting_service)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/working-groups/RAN2/graph")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["data"]["scope"] == {
+            "type": "working_group",
+            "id": "RAN2",
+            "label": "RAN2",
+        }
+        assert body["data"]["counts"]["meetings"] == 2
+        assert body["data"]["counts"]["tdocs"] == 4
+        assert body["data"]["revision_stats"]["cross_meeting_edges"] == 1
+        assert body["data"]["revision_stats"]["longest_chain"] == {
+            "length": 4,
+            "tdoc_ids": ["R2-0", "R2-1", "R2-2", "R2-3"],
+            "meeting_ids": ["RAN2-132", "RAN2-133"],
+        }
+        predecessor = next(
+            node for node in body["data"]["nodes"] if node["id"] == "tdoc:R2-0"
+        )
+        assert predecessor["boundary"] is False
+        highlighted = [
+            edge
+            for edge in body["data"]["edges"]
+            if edge["type"] == "revises" and edge["highlighted"]
+        ]
+        assert len(highlighted) == 3
+
+        companies = await client.get(
+            "/api/working-groups/RAN2/facets/company", params={"q": "eri"}
+        )
+        assert companies.json()["data"] == [
+            {"id": "ericsson", "label": "Ericsson", "tdoc_count": 2}
+        ]
+        filtered = await client.get(
+            "/api/working-groups/RAN2/graph", params={"company_ids": "ericsson"}
+        )
+        assert filtered.json()["data"]["counts"]["tdocs"] == 2
+        assert (await client.get("/api/working-groups/missing/graph")).status_code == 404

@@ -114,10 +114,51 @@ def facet_options(
     ]
 
 
+def revision_chain_stats(tdocs: list[TDoc]) -> dict[str, Any]:
+    by_id = {tdoc.id: tdoc for tdoc in tdocs}
+    longest: list[str] = []
+    revision_edges = 0
+    cross_meeting_edges = 0
+    for tdoc in tdocs:
+        if tdoc.revised_from:
+            revision_edges += 1
+            predecessor = by_id.get(tdoc.revised_from)
+            if predecessor and predecessor.meeting_id != tdoc.meeting_id:
+                cross_meeting_edges += 1
+        path: list[str] = []
+        seen: set[str] = set()
+        current: TDoc | None = tdoc
+        while current and current.id not in seen:
+            seen.add(current.id)
+            path.append(current.id)
+            current = by_id.get(current.revised_from) if current.revised_from else None
+        chronological = list(reversed(path))
+        if len(chronological) > len(longest) or (
+            len(chronological) == len(longest) and tuple(chronological) < tuple(longest)
+        ):
+            longest = chronological
+    meeting_ids = list(dict.fromkeys(by_id[identifier].meeting_id for identifier in longest))
+    return {
+        "revision_edges": revision_edges,
+        "cross_meeting_edges": cross_meeting_edges,
+        "longest_chain": {
+            "length": len(longest),
+            "tdoc_ids": longest,
+            "meeting_ids": meeting_ids,
+        },
+    }
+
+
 def build_graph(meeting: Meeting, tdocs: list[TDoc]) -> dict[str, Any]:
+    return build_scope_graph([meeting], tdocs)
+
+
+def build_scope_graph(meetings: list[Meeting], tdocs: list[TDoc]) -> dict[str, Any]:
     aliases = load_organization_aliases()
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
+    revision_stats = revision_chain_stats(tdocs)
+    longest_chain = set(revision_stats["longest_chain"]["tdoc_ids"])
 
     def add_node(
         entity_type: str,
@@ -142,7 +183,12 @@ def build_graph(meeting: Meeting, tdocs: list[TDoc]) -> dict[str, Any]:
         return key
 
     def add_edge(
-        source: str, target: str, predicate: str, evidence_ids: list[str]
+        source: str,
+        target: str,
+        predicate: str,
+        evidence_ids: list[str],
+        *,
+        highlighted: bool = False,
     ) -> None:
         value = "|".join((source, predicate, target))
         identifier = "edge-" + hashlib.sha256(value.encode()).hexdigest()[:32]
@@ -152,27 +198,46 @@ def build_graph(meeting: Meeting, tdocs: list[TDoc]) -> dict[str, Any]:
             "target": target,
             "type": predicate,
             "evidence_ids": evidence_ids,
+            "highlighted": highlighted,
         }
 
-    meeting_node = add_node(
-        "meeting",
-        meeting.id,
-        meeting.name,
-        {"working_group": meeting.working_group_id, "readiness": meeting.readiness},
-    )
+    meeting_nodes = {
+        meeting.id: add_node(
+            "meeting",
+            meeting.id,
+            meeting.name,
+            {
+                "working_group": meeting.working_group_id,
+                "readiness": meeting.readiness,
+                "starts_on": meeting.starts_on.isoformat() if meeting.starts_on else "",
+                "ends_on": meeting.ends_on.isoformat() if meeting.ends_on else "",
+            },
+        )
+        for meeting in meetings
+    }
     active_tdoc_ids = {tdoc.id for tdoc in tdocs}
     for tdoc in tdocs:
         tdoc_node = add_node(
-            "tdoc", tdoc.id, tdoc.title or tdoc.id, {"status": tdoc.status.value}
+            "tdoc",
+            tdoc.id,
+            tdoc.title or tdoc.id,
+            {
+                "status": tdoc.status.value,
+                "meeting_id": tdoc.meeting_id,
+                "longest_revision_chain": tdoc.id in longest_chain,
+            },
         )
-        add_edge(meeting_node, tdoc_node, "contains", tdoc.evidence_ids)
+        meeting_node = meeting_nodes.get(tdoc.meeting_id)
+        if meeting_node:
+            add_edge(meeting_node, tdoc_node, "contains", tdoc.evidence_ids)
         for company in split_organization_sources(tdoc.source):
             label = normalize_organization(company, aliases)
             node = add_node("organization", canonical_identifier(label), label)
             add_edge(tdoc_node, node, "submitted_by", tdoc.evidence_ids)
         if tdoc.agenda_item or tdoc.agenda_description:
             agenda_id = (
-                f"{meeting.id}:{canonical_identifier(tdoc.agenda_item or tdoc.agenda_description)}"
+                f"{tdoc.meeting_id}:"
+                f"{canonical_identifier(tdoc.agenda_item or tdoc.agenda_description)}"
             )
             node = add_node(
                 "agenda_item",
@@ -216,5 +281,17 @@ def build_graph(meeting: Meeting, tdocs: list[TDoc]) -> dict[str, Any]:
                 {"placeholder": True},
                 boundary=tdoc.revised_from not in active_tdoc_ids,
             )
-            add_edge(tdoc_node, predecessor, "revises", tdoc.evidence_ids)
-    return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+            add_edge(
+                tdoc_node,
+                predecessor,
+                "revises",
+                tdoc.evidence_ids,
+                highlighted=(
+                    tdoc.id in longest_chain and tdoc.revised_from in longest_chain
+                ),
+            )
+    return {
+        "nodes": list(nodes.values()),
+        "edges": list(edges.values()),
+        "revision_stats": revision_stats,
+    }

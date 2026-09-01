@@ -25,6 +25,7 @@ button { color:inherit; }
 .match-control { display:grid; grid-template-columns:1fr 1fr; height:31px; padding:2px; margin-bottom:18px; border:1px solid var(--line); border-radius:5px; background:#f2f3f1; }
 .match-control button { border:0; border-radius:3px; background:transparent; font-size:12px; }
 .match-control .active { background:white; color:var(--teal); box-shadow:0 1px 2px #00000012; font-weight:650; }
+.scope-control { margin-bottom:4px; }
 .filter-group { width:100%; min-height:69px; position:relative; text-align:left; border:0; border-top:1px solid #e8eae7; background:white; padding:12px 25px 11px 3px; }
 .filter-group span { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:11px; }
 .filter-group strong { display:block; margin-top:7px; font-size:12px; line-height:1.35; }
@@ -54,6 +55,7 @@ button { color:inherit; }
 .apply-filters:hover { background:#066f64; }
 .filter-stats { border-top:1px solid #e8eae7; margin-top:8px; padding-top:14px; display:flex; flex-wrap:wrap; gap:6px; }
 .filter-stats span { padding:4px 6px; border-radius:4px; background:#eef4f1; color:#48605a; font-size:10px; }
+.filter-stats span:nth-last-child(-n+2) { background:#faeee9; color:#91452f; }
 .graph-panel { min-width:0; display:flex; flex-direction:column; background:#f7f8f5; }
 .graph-toolbar { min-height:72px; flex:none; display:flex; align-items:center; justify-content:space-between; gap:20px; padding:9px 18px; border-bottom:1px solid var(--line); background:#fbfcfa; }
 .graph-toolbar strong { display:block; font-size:13px; }

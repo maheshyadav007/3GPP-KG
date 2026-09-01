@@ -90,6 +90,35 @@ def create_app(
         validator = token_validator or OidcTokenValidator(settings.security)
         app.add_middleware(OidcAuthMiddleware, validator=validator)
 
+    def complete_graph_response(
+        result: Any,
+        *,
+        missing_message: str,
+        limit_name: str,
+        max_nodes: int,
+        max_edges: int,
+    ) -> JSONResponse:
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=missing_message)
+        counts = result.data["counts"]
+        if counts["nodes"] > max_nodes or counts["edges"] > max_edges:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "message": (
+                        f"complete {limit_name} graph exceeds configured safety limits"
+                    ),
+                    "counts": counts,
+                    "max_nodes": max_nodes,
+                    "max_edges": max_edges,
+                },
+            )
+        if settings.database.preview_dataset_version:
+            result.warnings.append(
+                "Preview dataset is inactive; graph contents are complete for this dataset version."
+            )
+        return JSONResponse(result.model_dump(mode="json"))
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {
@@ -166,27 +195,13 @@ def create_app(
             specification_ids=specification_ids,
             match_mode=match_mode,
         )
-        if result.data is None:
-            raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
-        counts = result.data["counts"]
-        if (
-            counts["nodes"] > settings.graph.max_meeting_nodes
-            or counts["edges"] > settings.graph.max_meeting_edges
-        ):
-            raise HTTPException(
-                status_code=413,
-                detail={
-                    "message": "complete meeting graph exceeds configured safety limits",
-                    "counts": counts,
-                    "max_nodes": settings.graph.max_meeting_nodes,
-                    "max_edges": settings.graph.max_meeting_edges,
-                },
-            )
-        if settings.database.preview_dataset_version:
-            result.warnings.append(
-                "Preview dataset is inactive; graph contents are complete for this dataset version."
-            )
-        return JSONResponse(result.model_dump(mode="json"))
+        return complete_graph_response(
+            result,
+            missing_message=f"Meeting {meeting_id} was not found",
+            limit_name="meeting",
+            max_nodes=settings.graph.max_meeting_nodes,
+            max_edges=settings.graph.max_meeting_edges,
+        )
 
     @app.get("/api/meetings/{meeting_id}/facets/{facet}")
     async def meeting_facets(
@@ -200,6 +215,50 @@ def create_app(
         result = await knowledge.meeting_facets(meeting_id, facet, q, limit)  # type: ignore[arg-type]
         if result is None:
             raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.get("/api/working-groups/{working_group_id}/graph")
+    async def working_group_graph(
+        working_group_id: str,
+        query: str = "",
+        company_ids: Annotated[list[str] | None, Query()] = None,
+        topic_ids: Annotated[list[str] | None, Query()] = None,
+        specification_ids: Annotated[list[str] | None, Query()] = None,
+        match_mode: MatchMode = MatchMode.ALL,
+    ) -> JSONResponse:
+        result = await knowledge.working_group_graph(
+            working_group_id,
+            query=query,
+            company_ids=company_ids,
+            topic_ids=topic_ids,
+            specification_ids=specification_ids,
+            match_mode=match_mode,
+        )
+        return complete_graph_response(
+            result,
+            missing_message=f"Working group {working_group_id.upper()} was not found",
+            limit_name="working group",
+            max_nodes=settings.graph.max_working_group_nodes,
+            max_edges=settings.graph.max_working_group_edges,
+        )
+
+    @app.get("/api/working-groups/{working_group_id}/facets/{facet}")
+    async def working_group_facets(
+        working_group_id: str,
+        facet: str,
+        q: str = "",
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> JSONResponse:
+        if facet not in {"company", "topic", "specification"}:
+            raise HTTPException(status_code=422, detail="unsupported graph facet")
+        result = await knowledge.working_group_facets(
+            working_group_id, facet, q, limit  # type: ignore[arg-type]
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Working group {working_group_id.upper()} was not found",
+            )
         return JSONResponse(result.model_dump(mode="json"))
 
     @app.get("/api/graph")

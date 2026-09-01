@@ -75,10 +75,12 @@ uv run threegpp-kg serve
 In another terminal, run `cd web && npm run dev`, then open `http://localhost:3000`. The MCP
 Streamable HTTP endpoint is `http://localhost:8000/mcp`.
 
-The graph UI loads one complete meeting at a time. Choose the meeting first, then narrow its TDocs
-with company, topic, and specification autocomplete filters. Graph responses are never silently
-sampled: a meeting above the configured safety ceiling returns an explicit error. The document
-reader is resizable on desktop and opens as an overlay on narrower screens.
+The graph UI supports two complete scopes: one meeting or every stored meeting in one working
+group. Working-group scope resolves cross-meeting TDoc revisions as ordinary graph links, reports
+the longest revision chain, and highlights that chain in the graph. Choose the scope first, then
+narrow its TDocs with company, topic, and specification autocomplete filters. Graph responses are
+never silently sampled: a scope above its configured safety ceiling returns an explicit error. The
+document reader is resizable on desktop and opens as an overlay on narrower screens.
 
 On macOS, install and initialize the local database with:
 

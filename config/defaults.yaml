@@ -89,6 +89,8 @@ graph:
   max_edges: 5000
   max_meeting_nodes: 15000
   max_meeting_edges: 75000
+  max_working_group_nodes: 40000
+  max_working_group_edges: 250000
   document_block_page_size: 500
   max_document_block_page_size: 2000
   document_section_page_size: 200

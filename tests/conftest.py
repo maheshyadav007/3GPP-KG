@@ -97,3 +97,39 @@ def service() -> KnowledgeService:
     return KnowledgeService(
         InMemoryRepository([meeting], tdocs, [evidence], chunks, blocks, dataset_version="test-v1")
     )
+
+
+@pytest.fixture
+def multi_meeting_service(service: KnowledgeService) -> KnowledgeService:
+    repository = service.repository
+    assert isinstance(repository, InMemoryRepository)
+    previous_meeting = Meeting(
+        id="RAN2-132",
+        working_group_id="RAN2",
+        number=132,
+        name="RAN2 #132",
+        source_url="https://www.3gpp.org/meeting-132",
+        starts_on=date(2026, 2, 16),
+        ends_on=date(2026, 2, 20),
+        readiness="final_ready",
+    )
+    predecessor = TDoc(
+        id="R2-0",
+        meeting_id=previous_meeting.id,
+        title="Initial carrier aggregation proposal",
+        source="Qualcomm",
+        status=Conclusion.REVISED,
+        revised_to="R2-1",
+        releases=["Rel-20"],
+        agenda_description="Carrier aggregation",
+    )
+    return KnowledgeService(
+        InMemoryRepository(
+            [*repository.meetings, previous_meeting],
+            [*repository.tdocs, predecessor],
+            list(repository.evidence_map.values()),
+            repository.chunks,
+            repository.blocks,
+            dataset_version=repository.dataset_version,
+        )
+    )

@@ -98,6 +98,35 @@ and the wider cited TDoc reader. ForceAtlas2 runs in a worker and interactions r
 during layout. Desktop and 900 px responsive rendering were visually checked; the latter retained
 the graph and presented the reader as an overlay.
 
+## Incremental verification: working-group revision graph
+
+- Verification date: 2026-09-01
+- Candidate dataset: `latest5-all-wgs-20260830-v2`
+- Scope: complete WG projection, cross-meeting revision resolution, longest-chain calculation and
+  Meeting/Working group UI scope selection
+
+| Check | Result | Classification |
+|---|---:|---|
+| Complete RAN2 WG API | 5 meetings; 6,952 TDocs; 9,291 nodes; 47,816 edges | READY WITH LIMITATIONS |
+| Revision continuity | 887 revision links; 138 cross-meeting links; longest chain 7 TDocs across RAN2-133-bis and RAN2-134 | READY |
+| Graph integrity | 0 invalid endpoints; 7 longest-chain nodes and 6 connecting edges highlighted | READY |
+| External boundary context | 174 predecessor TDocs outside the selected five-meeting corpus retained as boundary nodes | READY |
+| Local compressed response | HTTP 200 in 2.17 seconds; 2.07 MB compressed | READY WITH LIMITATIONS |
+| Python suite | 160 passed; 1 optional PostgreSQL test skipped in the general run | PASS |
+| Isolated PostgreSQL integration | 1 passed | PASS |
+| Frontend component suite | 5 passed, including Meeting to WG scope switching | PASS |
+| Static/build checks | Ruff, strict mypy for 39 files, ESLint and production build passed | PASS |
+
+The WG projection uses the same canonical TDocs and evidence links as meeting scope. Revision
+predecessors owned by another selected meeting are normal nodes; only predecessors outside the
+available WG corpus are boundaries. The longest chain is calculated deterministically from
+`revised_from`, and its TDocs and revision edges are marked for stronger Sigma.js rendering.
+
+The local API and frontend component/build paths were verified, but a new interactive browser
+screenshot was not captured because the browser-control backend was unavailable during this run.
+The 2.17-second first request is slightly above the two-second production target and needs a
+networked repeated-load measurement before production classification can be raised.
+
 ## Readiness conclusion
 
 **Overall status: NOT READY for production.**

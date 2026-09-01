@@ -8,15 +8,19 @@ import type Sigma from 'sigma';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000';
 const MEETING_STORAGE_KEY = 'threegpp-graph-meeting';
+const WORKING_GROUP_STORAGE_KEY = 'threegpp-graph-working-group';
+const SCOPE_STORAGE_KEY = 'threegpp-graph-scope';
 const READER_WIDTH_KEY = 'threegpp-reader-width';
 const NODE_COLORS: Record<string, string> = { meeting: '#48545d', tdoc: '#cb5a3c', organization: '#087f72', agenda_item: '#6f7f3f', topic: '#c89018', specification: '#536aa0', release: '#8c5d95', work_item: '#68706e', change_request: '#9a4f68' };
-const LEGEND = [['organization', 'Company'], ['topic', 'Topic'], ['tdoc', 'TDoc'], ['agenda_item', 'Agenda'], ['specification', 'Spec'], ['release', 'Release'], ['work_item', 'Work item'], ['change_request', 'CR']];
+const LEGEND = [['meeting', 'Meeting'], ['organization', 'Company'], ['topic', 'Topic'], ['tdoc', 'TDoc'], ['agenda_item', 'Agenda'], ['specification', 'Spec'], ['release', 'Release'], ['work_item', 'Work item'], ['change_request', 'CR']];
 
 type Meeting = { id: string; working_group_id: string; name: string; starts_on?: string; ends_on?: string; readiness: string; tdoc_count: number };
+type ScopeType = 'meeting' | 'working_group';
 type GraphNode = { id: string; entity_id: string; type: string; label: string; properties: Record<string, unknown>; boundary: boolean };
-type GraphEdge = { id: string; source: string; target: string; type: string; evidence_ids: string[] };
-type GraphCounts = { tdocs: number; nodes: number; edges: number; total_tdocs: number; total_nodes: number; total_edges: number };
-type GraphEnvelope = { data: { meeting: Meeting; nodes: GraphNode[]; edges: GraphEdge[]; counts: GraphCounts; match_mode: 'all' | 'any' }; dataset_version: string; warnings: string[] };
+type GraphEdge = { id: string; source: string; target: string; type: string; evidence_ids: string[]; highlighted: boolean };
+type GraphCounts = { meetings: number; tdocs: number; nodes: number; edges: number; total_tdocs: number; total_nodes: number; total_edges: number };
+type RevisionStats = { revision_edges: number; cross_meeting_edges: number; longest_chain: { length: number; tdoc_ids: string[]; meeting_ids: string[] } };
+type GraphEnvelope = { data: { scope: { type: ScopeType; id: string; label: string }; meeting?: Meeting; meetings: Meeting[]; nodes: GraphNode[]; edges: GraphEdge[]; counts: GraphCounts; revision_stats: RevisionStats; total_revision_stats: RevisionStats; match_mode: 'all' | 'any' }; dataset_version: string; warnings: string[] };
 type FacetKind = 'company' | 'topic' | 'specification';
 type FacetOption = { id: string; label: string; tdoc_count: number };
 type Evidence = { id: string; source_url: string; authority: string; section_path: string[]; excerpt?: string };
@@ -27,7 +31,9 @@ type TDocEnvelope = { data: { tdoc: TDoc; blocks: DocumentBlock[] } | null; evid
 
 export default function Home() {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [scopeType, setScopeType] = useState<ScopeType>('meeting');
   const [meetingId, setMeetingId] = useState('');
+  const [workingGroupId, setWorkingGroupId] = useState('');
   const [query, setQuery] = useState('');
   const [appliedQuery, setAppliedQuery] = useState('');
   const [companies, setCompanies] = useState<FacetOption[]>([]);
@@ -56,12 +62,18 @@ export default function Home() {
         const restored = data.find((meeting) => meeting.id === stored);
         const fallback = [...data].filter((meeting) => meeting.readiness === 'final_ready' && meeting.ends_on).sort((left, right) => (right.ends_on ?? '').localeCompare(left.ends_on ?? ''))[0] ?? data[0];
         setMeetingId((restored ?? fallback)?.id ?? '');
+        const groups = [...new Set(data.map((meeting) => meeting.working_group_id))].sort();
+        const storedGroup = window.localStorage.getItem(WORKING_GROUP_STORAGE_KEY);
+        setWorkingGroupId(storedGroup && groups.includes(storedGroup) ? storedGroup : (fallback?.working_group_id ?? groups[0] ?? ''));
+        setScopeType(window.localStorage.getItem(SCOPE_STORAGE_KEY) === 'working_group' ? 'working_group' : 'meeting');
       })
       .catch((reason: unknown) => { if ((reason as Error).name !== 'AbortError') setError(reason instanceof Error ? reason.message : 'Meeting request failed'); });
     return () => controller.abort();
   }, []);
 
   const selectedId = selected?.data?.tdoc.id;
+  const scopeId = scopeType === 'meeting' ? meetingId : workingGroupId;
+  const scopePath = scopeApiPath(scopeType, scopeId);
   useEffect(() => { selectedIdRef.current = selectedId; }, [selectedId]);
   const openDocument = useCallback(async (id: string, options: { cursor?: string; startBlock?: number } = {}) => {
     documentRequest.current?.abort();
@@ -70,7 +82,7 @@ export default function Home() {
     await loadDocument(id, setSelected, options, controller.signal);
   }, []);
   const loadGraph = useCallback(async () => {
-    if (!meetingId) return;
+    if (!scopeId) return;
     graphRequest.current?.abort();
     const controller = new AbortController();
     graphRequest.current = controller;
@@ -81,7 +93,7 @@ export default function Home() {
     topics.forEach((value) => parameters.append('topic_ids', value.id));
     specifications.forEach((value) => parameters.append('specification_ids', value.id));
     try {
-      const response = await fetch(`${API_BASE}/api/meetings/${encodeURIComponent(meetingId)}/graph?${parameters}`, { signal: controller.signal });
+      const response = await fetch(`${API_BASE}/api/${scopePath}/graph?${parameters}`, { signal: controller.signal });
       if (!response.ok) throw new Error(`Graph request failed with HTTP ${response.status}`);
       const payload = (await response.json()) as GraphEnvelope;
       setGraph(payload);
@@ -97,44 +109,60 @@ export default function Home() {
     } finally {
       if (graphRequest.current === controller) setLoading(false);
     }
-  }, [appliedQuery, companies, matchMode, meetingId, openDocument, specifications, topics]);
+  }, [appliedQuery, companies, matchMode, openDocument, scopeId, scopePath, specifications, topics]);
 
   useEffect(() => { const timeout = window.setTimeout(() => { void loadGraph(); }, 0); return () => { window.clearTimeout(timeout); graphRequest.current?.abort(); }; }, [loadGraph]);
   useEffect(() => () => documentRequest.current?.abort(), []);
 
-  function changeMeeting(value: string) {
+  function resetScopeState() {
     documentRequest.current?.abort();
-    window.localStorage.setItem(MEETING_STORAGE_KEY, value);
-    setCompanies([]); setTopics([]); setSpecifications([]); setQuery(''); setAppliedQuery(''); setSelected(null); setMeetingId(value);
+    graphRequest.current?.abort();
+    setCompanies([]); setTopics([]); setSpecifications([]); setQuery(''); setAppliedQuery(''); setSelected(null); setGraph(null);
+  }
+  function changeScopeType(value: ScopeType) {
+    resetScopeState();
+    window.localStorage.setItem(SCOPE_STORAGE_KEY, value);
+    setScopeType(value);
+  }
+  function changeScopeValue(value: string) {
+    resetScopeState();
+    if (scopeType === 'meeting') {
+      window.localStorage.setItem(MEETING_STORAGE_KEY, value);
+      setMeetingId(value);
+    } else {
+      window.localStorage.setItem(WORKING_GROUP_STORAGE_KEY, value);
+      setWorkingGroupId(value);
+    }
   }
   function submitSearch(event: FormEvent) { event.preventDefault(); setAppliedQuery(query.trim()); }
   function resizeReader(width: number) { const next = clampReaderWidth(width); setReaderWidth(next); window.localStorage.setItem(READER_WIDTH_KEY, String(next)); }
   const selectDocument = useCallback((id: string) => { void openDocument(id); }, [openDocument]);
   const groupedMeetings = useMemo(() => Object.groupBy(meetings, (meeting) => meeting.working_group_id), [meetings]);
+  const workingGroups = useMemo(() => [...new Set(meetings.map((meeting) => meeting.working_group_id))].sort(), [meetings]);
   const workspaceStyle = { '--reader-width': selected?.data ? `${readerWidth}px` : '0px' } as CSSProperties;
 
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><Network size={19} /><strong>3GPP Evidence Graph</strong></div><form className="global-search" onSubmit={submitSearch}><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Search the active meeting" placeholder="Search TDocs in the active meeting" /><button type="submit" title="Search"><Search size={14} /></button></form><div className="dataset-state"><span />{graph ? `${graph.warnings.length ? 'Preview · ' : ''}${graph.dataset_version}` : 'Loading dataset'}</div></header>
+    <header className="topbar"><div className="brand"><Network size={19} /><strong>3GPP Evidence Graph</strong></div><form className="global-search" onSubmit={submitSearch}><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="Search the active graph scope" placeholder="Search TDocs in the active scope" /><button type="submit" title="Search"><Search size={14} /></button></form><div className="dataset-state"><span />{graph ? `${graph.warnings.length ? 'Preview · ' : ''}${graph.dataset_version}` : 'Loading dataset'}</div></header>
     <div className="workspace" style={workspaceStyle}>
-      <aside className="filters-panel"><div className="panel-title"><Filter size={16} /><h2>Filters</h2></div><label className="filter-block meeting-filter"><span className="filter-label"><CalendarDays size={15} />Meeting</span><select value={meetingId} onChange={(event) => changeMeeting(event.target.value)} aria-label="Active meeting">{Object.entries(groupedMeetings).map(([group, values]) => <optgroup key={group} label={group}>{values?.map((meeting) => <option value={meeting.id} key={meeting.id}>{meeting.id} · {meeting.tdoc_count.toLocaleString()} TDocs</option>)}</optgroup>)}</select></label><div className="match-control" aria-label="Filter match mode"><button className={matchMode === 'all' ? 'active' : ''} onClick={() => setMatchMode('all')}>All</button><button className={matchMode === 'any' ? 'active' : ''} onClick={() => setMatchMode('any')}>Any</button></div><FacetCombobox meetingId={meetingId} kind="company" icon={<Building2 size={15} />} label="Companies" selected={companies} onChange={setCompanies} /><FacetCombobox meetingId={meetingId} kind="topic" icon={<FileText size={15} />} label="Topics" selected={topics} onChange={setTopics} /><FacetCombobox meetingId={meetingId} kind="specification" icon={<ListTree size={15} />} label="Specifications" selected={specifications} onChange={setSpecifications} /><div className="filter-stats"><span>{graph?.data.counts.tdocs.toLocaleString() ?? 0} TDocs</span><span>{graph?.data.counts.nodes.toLocaleString() ?? 0} nodes</span><span>{graph?.data.counts.edges.toLocaleString() ?? 0} edges</span></div></aside>
-      <section className="graph-panel" aria-label="3GPP knowledge graph"><div className="graph-toolbar"><div><strong>Complete meeting graph</strong><span>{graph ? graphCountLabel(graph.data.counts) : 'Loading meeting'}</span></div><div className="legend">{LEGEND.map(([type, label]) => <span className="legend-item" key={type}><i style={{ background: NODE_COLORS[type] }} />{label}</span>)}</div></div><div className="graph-canvas">{loading && <div className="canvas-state">Loading complete meeting graph</div>}{error && <div className="canvas-state error">{error}</div>}{graph && !loading && <SigmaGraph data={graph.data} onSelect={selectDocument} />}</div></section>
+      <aside className="filters-panel"><div className="panel-title"><Filter size={16} /><h2>Filters</h2></div><div className="match-control scope-control" aria-label="Graph scope"><button className={scopeType === 'meeting' ? 'active' : ''} onClick={() => changeScopeType('meeting')}>Meeting</button><button className={scopeType === 'working_group' ? 'active' : ''} onClick={() => changeScopeType('working_group')}>Working group</button></div><label className="filter-block meeting-filter"><span className="filter-label"><CalendarDays size={15} />{scopeType === 'meeting' ? 'Meeting' : 'Working group'}</span>{scopeType === 'meeting' ? <select value={meetingId} onChange={(event) => changeScopeValue(event.target.value)} aria-label="Active meeting">{Object.entries(groupedMeetings).map(([group, values]) => <optgroup key={group} label={group}>{values?.map((meeting) => <option value={meeting.id} key={meeting.id}>{meeting.id} · {meeting.tdoc_count.toLocaleString()} TDocs</option>)}</optgroup>)}</select> : <select value={workingGroupId} onChange={(event) => changeScopeValue(event.target.value)} aria-label="Active working group">{workingGroups.map((group) => <option value={group} key={group}>{group} · {meetings.filter((meeting) => meeting.working_group_id === group).length} meetings</option>)}</select>}</label><div className="match-control" aria-label="Filter match mode"><button className={matchMode === 'all' ? 'active' : ''} onClick={() => setMatchMode('all')}>All</button><button className={matchMode === 'any' ? 'active' : ''} onClick={() => setMatchMode('any')}>Any</button></div><FacetCombobox scopePath={scopePath} kind="company" icon={<Building2 size={15} />} label="Companies" selected={companies} onChange={setCompanies} /><FacetCombobox scopePath={scopePath} kind="topic" icon={<FileText size={15} />} label="Topics" selected={topics} onChange={setTopics} /><FacetCombobox scopePath={scopePath} kind="specification" icon={<ListTree size={15} />} label="Specifications" selected={specifications} onChange={setSpecifications} /><div className="filter-stats"><span>{graph?.data.counts.meetings.toLocaleString() ?? 0} meetings</span><span>{graph?.data.counts.tdocs.toLocaleString() ?? 0} TDocs</span><span>{graph?.data.counts.nodes.toLocaleString() ?? 0} nodes</span><span>{graph?.data.counts.edges.toLocaleString() ?? 0} edges</span>{graph && <><span>{graph.data.revision_stats.cross_meeting_edges.toLocaleString()} cross-meeting revisions</span><span>Longest chain: {graph.data.revision_stats.longest_chain.length.toLocaleString()}</span></>}</div></aside>
+      <section className="graph-panel" aria-label="3GPP knowledge graph"><div className="graph-toolbar"><div><strong>Complete {scopeType === 'meeting' ? 'meeting' : `${workingGroupId} working group`} graph</strong><span>{graph ? graphCountLabel(graph.data.counts) : 'Loading graph scope'}</span>{graph && <span>{revisionSummary(graph.data.revision_stats)}</span>}</div><div className="legend">{LEGEND.map(([type, label]) => <span className="legend-item" key={type}><i style={{ background: NODE_COLORS[type] }} />{label}</span>)}</div></div><div className="graph-canvas">{loading && <div className="canvas-state">Loading complete graph</div>}{error && <div className="canvas-state error">{error}</div>}{graph && !loading && <SigmaGraph data={graph.data} onSelect={selectDocument} />}</div></section>
       {selected?.data && <DocumentPanel envelope={selected} onClose={() => { documentRequest.current?.abort(); setSelected(null); }} onResize={resizeReader} onLoadMore={(id, cursor) => { void openDocument(id, { cursor }); }} onJump={(id, startBlock) => { void openDocument(id, { startBlock }); }} />}
     </div>
   </main>;
 }
 
-export function FacetCombobox({ meetingId, kind, icon, label, selected, onChange }: { meetingId: string; kind: FacetKind; icon: ReactNode; label: string; selected: FacetOption[]; onChange: (values: FacetOption[]) => void }) {
+export function FacetCombobox({ scopePath, kind, icon, label, selected, onChange }: { scopePath: string; kind: FacetKind; icon: ReactNode; label: string; selected: FacetOption[]; onChange: (values: FacetOption[]) => void }) {
   const [input, setInput] = useState(''); const [options, setOptions] = useState<FacetOption[]>([]); const [open, setOpen] = useState(false); const [active, setActive] = useState(0); const request = useRef<AbortController | null>(null);
-  useEffect(() => { if (!open || !meetingId) return; const timeout = window.setTimeout(() => { request.current?.abort(); const controller = new AbortController(); request.current = controller; void fetch(`${API_BASE}/api/meetings/${encodeURIComponent(meetingId)}/facets/${kind}?q=${encodeURIComponent(input)}&limit=20`, { signal: controller.signal }).then((response) => response.ok ? response.json() : Promise.reject(new Error(`Facet request failed with HTTP ${response.status}`))).then((payload: { data: FacetOption[] }) => { setOptions(payload.data.filter((option) => !selected.some((value) => value.id === option.id))); setActive(0); }).catch((reason: Error) => { if (reason.name !== 'AbortError') setOptions([]); }); }, 180); return () => window.clearTimeout(timeout); }, [input, kind, meetingId, open, selected]);
+  useEffect(() => { if (!open || !scopePath) return; const timeout = window.setTimeout(() => { request.current?.abort(); const controller = new AbortController(); request.current = controller; void fetch(`${API_BASE}/api/${scopePath}/facets/${kind}?q=${encodeURIComponent(input)}&limit=20`, { signal: controller.signal }).then((response) => response.ok ? response.json() : Promise.reject(new Error(`Facet request failed with HTTP ${response.status}`))).then((payload: { data: FacetOption[] }) => { setOptions(payload.data.filter((option) => !selected.some((value) => value.id === option.id))); setActive(0); }).catch((reason: Error) => { if (reason.name !== 'AbortError') setOptions([]); }); }, 180); return () => window.clearTimeout(timeout); }, [input, kind, open, scopePath, selected]);
   useEffect(() => () => request.current?.abort(), []);
   function choose(option: FacetOption) { onChange([...selected, option]); setInput(''); setOpen(true); }
   function keyDown(event: KeyboardEvent<HTMLInputElement>) { if (event.key === 'ArrowDown') { event.preventDefault(); setOpen(true); setActive((value) => Math.min(value + 1, options.length - 1)); } if (event.key === 'ArrowUp') { event.preventDefault(); setActive((value) => Math.max(value - 1, 0)); } if (event.key === 'Enter' && open && options[active]) { event.preventDefault(); choose(options[active]); } if (event.key === 'Escape') setOpen(false); if (event.key === 'Backspace' && !input && selected.length) onChange(selected.slice(0, -1)); }
-  return <div className="filter-block facet-field"><span className="filter-label">{icon}{label}</span><div className="combobox-shell">{selected.map((option) => <span className="filter-chip" key={option.id}>{option.label}<button title={`Remove ${option.label}`} onClick={() => onChange(selected.filter((value) => value.id !== option.id))}><X size={11} /></button></span>)}<input value={input} disabled={!meetingId} onChange={(event) => { setInput(event.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onBlur={() => window.setTimeout(() => setOpen(false), 120)} onKeyDown={keyDown} role="combobox" aria-expanded={open} aria-controls={`${kind}-options`} aria-autocomplete="list" placeholder={selected.length ? 'Add another' : `Find ${label.toLowerCase()}`} /></div>{open && <div className="facet-options" id={`${kind}-options`} role="listbox">{options.length ? options.map((option, index) => <button role="option" aria-selected={index === active} className={index === active ? 'active' : ''} key={option.id} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(option)}><span>{option.label}</span><small>{option.tdoc_count.toLocaleString()}</small></button>) : <p>No matching values</p>}</div>}</div>;
+  return <div className="filter-block facet-field"><span className="filter-label">{icon}{label}</span><div className="combobox-shell">{selected.map((option) => <span className="filter-chip" key={option.id}>{option.label}<button title={`Remove ${option.label}`} onClick={() => onChange(selected.filter((value) => value.id !== option.id))}><X size={11} /></button></span>)}<input value={input} disabled={!scopePath} onChange={(event) => { setInput(event.target.value); setOpen(true); }} onFocus={() => setOpen(true)} onBlur={() => window.setTimeout(() => setOpen(false), 120)} onKeyDown={keyDown} role="combobox" aria-expanded={open} aria-controls={`${kind}-options`} aria-autocomplete="list" placeholder={selected.length ? 'Add another' : `Find ${label.toLowerCase()}`} /></div>{open && <div className="facet-options" id={`${kind}-options`} role="listbox">{options.length ? options.map((option, index) => <button role="option" aria-selected={index === active} className={index === active ? 'active' : ''} key={option.id} onMouseDown={(event) => event.preventDefault()} onClick={() => choose(option)}><span>{option.label}</span><small>{option.tdoc_count.toLocaleString()}</small></button>) : <p>No matching values</p>}</div>}</div>;
 }
 
 function SigmaGraph({ data, onSelect }: { data: GraphEnvelope['data']; onSelect: (id: string) => void }) {
   const container = useRef<HTMLDivElement>(null); const rendererRef = useRef<Sigma | null>(null); const graphRef = useRef<Graph | null>(null);
-  useEffect(() => { if (!container.current || !data.nodes.length) return; let active = true; let renderer: Sigma | null = null; let layout: FA2LayoutSupervisor | null = null; let stopTimer = 0; const containerElement = container.current; async function renderGraph() { const [{ default: forceAtlas2 }, { default: FA2Layout }, { default: GraphClass }, { default: SigmaClass }] = await Promise.all([import('graphology-layout-forceatlas2'), import('graphology-layout-forceatlas2/worker'), import('graphology'), import('sigma')]); if (!active) return; const graph = new GraphClass({ multi: true }); data.nodes.forEach((node, index) => { const angle = hashNumber(node.id) * Math.PI * 2; const radius = 1 + (index % 29) / 20; graph.addNode(node.id, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, size: node.type === 'tdoc' ? 5 : node.type === 'meeting' ? 12 : node.type === 'topic' ? 7 : 4, color: node.boundary ? '#ffffff' : NODE_COLORS[node.type] ?? '#68706e', label: node.label, nodeType: node.type, entityId: node.entity_id, highlighted: node.boundary }); }); data.edges.forEach((edge) => { if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) graph.addEdgeWithKey(edge.id, edge.source, edge.target, { size: 0.7, color: '#aeb7b3', type: 'line' }); }); renderer = new SigmaClass(graph, containerElement, { allowInvalidContainer: true, hideEdgesOnMove: true, labelDensity: 0.08, labelGridCellSize: 140, labelRenderedSizeThreshold: 7, minCameraRatio: 0.03, maxCameraRatio: 15 }); rendererRef.current = renderer; graphRef.current = graph; renderer.on('clickNode', ({ node }: { node: string }) => { if (graph.getNodeAttribute(node, 'nodeType') === 'tdoc') onSelect(String(graph.getNodeAttribute(node, 'entityId'))); }); if (graph.order > 1) { layout = new FA2Layout(graph, { settings: { ...forceAtlas2.inferSettings(graph), barnesHutOptimize: true, gravity: 1.2, scalingRatio: 8, slowDown: 5 } }); layout.start(); stopTimer = window.setTimeout(() => { layout?.stop(); renderer?.refresh(); renderer?.getCamera().animatedReset({ duration: 400 }); }, Math.min(6000, 1800 + graph.order)); } } void renderGraph(); return () => { active = false; window.clearTimeout(stopTimer); layout?.kill(); renderer?.kill(); rendererRef.current = null; graphRef.current = null; }; }, [data, onSelect]);
+  useEffect(() => { if (!container.current || !data.nodes.length) return; let active = true; let renderer: Sigma | null = null; let layout: FA2LayoutSupervisor | null = null; let stopTimer = 0; const containerElement = container.current; async function renderGraph() { const [{ default: forceAtlas2 }, { default: FA2Layout }, { default: GraphClass }, { default: SigmaClass }] = await Promise.all([import('graphology-layout-forceatlas2'), import('graphology-layout-forceatlas2/worker'), import('graphology'), import('sigma')]); if (!active) return; const graph = new GraphClass({ multi: true }); data.nodes.forEach((node, index) => { const angle = hashNumber(node.id) * Math.PI * 2; const radius = 1 + (index % 29) / 20; const longestRevision = node.properties.longest_revision_chain === true; graph.addNode(node.id, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius, size: longestRevision ? 8 : node.type === 'tdoc' ? 5 : node.type === 'meeting' ? 12 : node.type === 'topic' ? 7 : 4, color: node.boundary ? '#ffffff' : longestRevision ? '#d23f2f' : NODE_COLORS[node.type] ?? '#68706e', label: node.label, nodeType: node.type, entityId: node.entity_id, highlighted: node.boundary || longestRevision }); }); data.edges.forEach((edge) => { if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) graph.addEdgeWithKey(edge.id, edge.source, edge.target, { size: edge.highlighted ? 2.2 : edge.type === 'revises' ? 1.2 : 0.55, color: edge.highlighted ? '#d23f2f' : edge.type === 'revises' ? '#d98972' : '#aeb7b3', type: 'line', zIndex: edge.highlighted ? 2 : 0 }); }); renderer = new SigmaClass(graph, containerElement, { allowInvalidContainer: true, hideEdgesOnMove: true, labelDensity: 0.08, labelGridCellSize: 140, labelRenderedSizeThreshold: 7, minCameraRatio: 0.03, maxCameraRatio: 15, zIndex: true }); rendererRef.current = renderer; graphRef.current = graph; renderer.on('clickNode', ({ node }: { node: string }) => { if (graph.getNodeAttribute(node, 'nodeType') === 'tdoc') onSelect(String(graph.getNodeAttribute(node, 'entityId'))); }); if (graph.order > 1) { layout = new FA2Layout(graph, { settings: { ...forceAtlas2.inferSettings(graph), barnesHutOptimize: true, gravity: 1.2, scalingRatio: 8, slowDown: 5 } }); layout.start(); stopTimer = window.setTimeout(() => { layout?.stop(); renderer?.refresh(); renderer?.getCamera().animatedReset({ duration: 400 }); }, Math.min(6000, 1800 + graph.order)); } } void renderGraph(); return () => { active = false; window.clearTimeout(stopTimer); layout?.kill(); renderer?.kill(); rendererRef.current = null; graphRef.current = null; }; }, [data, onSelect]);
   function resetLayout() { graphRef.current?.forEachNode((node: string, attributes: Record<string, unknown>) => { const angle = hashNumber(node) * Math.PI * 2; graphRef.current?.setNodeAttribute(node, 'x', Math.cos(angle) * Number(attributes.size ?? 1)); graphRef.current?.setNodeAttribute(node, 'y', Math.sin(angle) * Number(attributes.size ?? 1)); }); rendererRef.current?.refresh(); rendererRef.current?.getCamera().animatedReset({ duration: 300 }); }
   return <><div className="sigma-container" ref={container} /><div className="graph-controls"><button title="Fit graph" onClick={() => rendererRef.current?.getCamera().animatedReset({ duration: 300 })}><Maximize2 size={16} /></button><button title="Reset positions" onClick={resetLayout}><RotateCcw size={15} /></button></div></>;
 }
@@ -149,5 +177,7 @@ function SectionNavigator({ sections, onJump }: { sections: DocumentSection[]; o
 
 async function loadDocument(id: string, setSelected: Dispatch<SetStateAction<TDocEnvelope | null>>, options: { cursor?: string; startBlock?: number } = {}, signal?: AbortSignal) { const parameters = new URLSearchParams({ block_limit: '500' }); if (options.cursor) parameters.set('cursor', options.cursor); if (options.startBlock !== undefined) parameters.set('start_block', String(options.startBlock)); const requestOptions = signal ? { signal } : undefined; const detailRequest = fetch(`${API_BASE}/api/tdocs/${encodeURIComponent(id)}?${parameters}`, requestOptions); const sectionRequest = options.cursor ? null : fetch(`${API_BASE}/api/tdocs/${encodeURIComponent(id)}/sections?limit=1000`, requestOptions); try { const [response, sectionResponse] = await Promise.all([detailRequest, sectionRequest]); if (!response.ok) return; const payload = (await response.json()) as TDocEnvelope; const sections = sectionResponse?.ok ? ((await sectionResponse.json()) as { data: DocumentSection[] }).data : undefined; setSelected((current) => options.cursor && current?.data && payload.data && current.data.tdoc.id === payload.data.tdoc.id ? { ...payload, sections: current.sections, data: { ...payload.data, blocks: [...current.data.blocks, ...payload.data.blocks] } } : { ...payload, sections: sections ?? (current?.data?.tdoc.id === id ? current.sections : undefined) }); } catch (reason) { if ((reason as Error).name !== 'AbortError') throw reason; } }
 export function graphCountLabel(counts: GraphCounts) { const filtered = counts.tdocs !== counts.total_tdocs; return filtered ? `${counts.nodes.toLocaleString()} of ${counts.total_nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} of ${counts.total_edges.toLocaleString()} relationships` : `${counts.nodes.toLocaleString()} nodes · ${counts.edges.toLocaleString()} relationships · no truncation`; }
+export function scopeApiPath(scopeType: ScopeType, scopeId: string) { return `${scopeType === 'meeting' ? 'meetings' : 'working-groups'}/${encodeURIComponent(scopeId)}`; }
+export function revisionSummary(stats: RevisionStats) { return `${stats.revision_edges.toLocaleString()} revision links · ${stats.cross_meeting_edges.toLocaleString()} cross meeting · longest chain ${stats.longest_chain.length.toLocaleString()}`; }
 export function clampReaderWidth(width: number) { return Math.round(Math.max(420, Math.min(window.innerWidth * 0.5, width))); }
 function hashNumber(value: string) { let hash = 2166136261; for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619); return (hash >>> 0) / 4294967295; }

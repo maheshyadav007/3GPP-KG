@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 from .constants import Conclusion, MatchMode
 from .domain import (
     Envelope,
+    Meeting,
     NewsletterPacket,
     Passage,
     SearchFilters,
@@ -15,7 +17,7 @@ from .domain import (
     TDocDetail,
     TemporalScope,
 )
-from .graph_view import FacetKind, build_graph, facet_options, filter_tdocs
+from .graph_view import FacetKind, build_graph, build_scope_graph, facet_options, filter_tdocs
 from .models.client import ModelEndpointError, OpenAICompatibleClient
 from .repository import InMemoryRepository, Repository, decode_cursor, encode_cursor
 
@@ -86,28 +88,66 @@ class KnowledgeService:
         )
         full_graph = build_graph(meeting, all_tdocs)
         graph = full_graph if len(selected) == len(all_tdocs) else build_graph(meeting, selected)
-        evidence_ids = list(
-            dict.fromkeys(identifier for tdoc in selected for identifier in tdoc.evidence_ids)
+        return await self._graph_envelope(
+            meetings=[meeting],
+            all_tdocs=all_tdocs,
+            selected=selected,
+            graph=graph,
+            full_graph=full_graph,
+            scope_type="meeting",
+            scope_id=meeting.id,
+            scope_label=meeting.name,
+            version=version,
+            match_mode=match_mode,
+            meeting=meeting,
         )
-        return Envelope(
-            data={
-                "meeting": meeting.model_dump(mode="json"),
-                "nodes": graph["nodes"],
-                "edges": graph["edges"],
-                "counts": {
-                    "tdocs": len(selected),
-                    "nodes": len(graph["nodes"]),
-                    "edges": len(graph["edges"]),
-                    "total_tdocs": len(all_tdocs),
-                    "total_nodes": len(full_graph["nodes"]),
-                    "total_edges": len(full_graph["edges"]),
-                },
-                "match_mode": match_mode.value,
-            },
-            evidence=await self.repository.evidence(evidence_ids),
-            dataset_version=version,
-            completeness="complete",
-            confidence=1.0,
+
+    async def working_group_graph(
+        self,
+        working_group_id: str,
+        *,
+        query: str = "",
+        company_ids: list[str] | None = None,
+        topic_ids: list[str] | None = None,
+        specification_ids: list[str] | None = None,
+        match_mode: MatchMode = MatchMode.ALL,
+    ) -> Envelope[dict[str, Any] | None]:
+        working_group_id = working_group_id.upper()
+        meetings, all_tdocs = await self._working_group_scope(working_group_id)
+        version = await self.repository.active_dataset_version()
+        if not meetings:
+            return Envelope(
+                data=None,
+                dataset_version=version,
+                completeness="unavailable",
+                confidence=0.0,
+                warnings=[f"Working group {working_group_id} was not found"],
+            )
+        selected = filter_tdocs(
+            all_tdocs,
+            query=query,
+            company_ids=company_ids or [],
+            topic_ids=topic_ids or [],
+            specification_ids=specification_ids or [],
+            match_mode=match_mode,
+        )
+        full_graph = build_scope_graph(meetings, all_tdocs)
+        graph = (
+            full_graph
+            if len(selected) == len(all_tdocs)
+            else build_scope_graph(meetings, selected)
+        )
+        return await self._graph_envelope(
+            meetings=meetings,
+            all_tdocs=all_tdocs,
+            selected=selected,
+            graph=graph,
+            full_graph=full_graph,
+            scope_type="working_group",
+            scope_id=working_group_id,
+            scope_label=working_group_id,
+            version=version,
+            match_mode=match_mode,
         )
 
     async def meeting_facets(
@@ -120,6 +160,92 @@ class KnowledgeService:
         return Envelope(
             data=values,
             dataset_version=await self.repository.active_dataset_version(),
+            completeness="complete",
+            confidence=1.0,
+        )
+
+    async def working_group_facets(
+        self, working_group_id: str, facet: FacetKind, query: str, limit: int
+    ) -> Envelope[list[dict[str, Any]]] | None:
+        meetings, tdocs = await self._working_group_scope(working_group_id.upper())
+        if not meetings:
+            return None
+        return Envelope(
+            data=facet_options(tdocs, facet, query, limit),
+            dataset_version=await self.repository.active_dataset_version(),
+            completeness="complete",
+            confidence=1.0,
+        )
+
+    async def _working_group_scope(
+        self, working_group_id: str
+    ) -> tuple[list[Meeting], list[TDoc]]:
+        meetings: list[Meeting] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = await self.repository.list_meetings(
+                [working_group_id],
+                SearchRequest(filters=SearchFilters(), top_k=100, cursor=cursor),
+            )
+            meetings.extend(page)
+            if cursor is None:
+                break
+        pages: list[list[TDoc]] = []
+        for offset in range(0, len(meetings), 20):
+            pages.extend(
+                await asyncio.gather(
+                    *(
+                        self.repository.meeting_tdocs(meeting.id)
+                        for meeting in meetings[offset : offset + 20]
+                    )
+                )
+            )
+        return meetings, sorted(
+            (tdoc for page in pages for tdoc in page), key=lambda item: item.id
+        )
+
+    async def _graph_envelope(
+        self,
+        *,
+        meetings: list[Meeting],
+        all_tdocs: list[TDoc],
+        selected: list[TDoc],
+        graph: dict[str, Any],
+        full_graph: dict[str, Any],
+        scope_type: str,
+        scope_id: str,
+        scope_label: str,
+        version: str,
+        match_mode: MatchMode,
+        meeting: Meeting | None = None,
+    ) -> Envelope[dict[str, Any] | None]:
+        evidence_ids = list(
+            dict.fromkeys(identifier for tdoc in selected for identifier in tdoc.evidence_ids)
+        )
+        data: dict[str, Any] = {
+            "scope": {"type": scope_type, "id": scope_id, "label": scope_label},
+            "meetings": [item.model_dump(mode="json") for item in meetings],
+            "nodes": graph["nodes"],
+            "edges": graph["edges"],
+            "counts": {
+                "meetings": len(meetings),
+                "tdocs": len(selected),
+                "nodes": len(graph["nodes"]),
+                "edges": len(graph["edges"]),
+                "total_tdocs": len(all_tdocs),
+                "total_nodes": len(full_graph["nodes"]),
+                "total_edges": len(full_graph["edges"]),
+            },
+            "revision_stats": graph["revision_stats"],
+            "total_revision_stats": full_graph["revision_stats"],
+            "match_mode": match_mode.value,
+        }
+        if meeting:
+            data["meeting"] = meeting.model_dump(mode="json")
+        return Envelope(
+            data=data,
+            evidence=await self.repository.evidence(evidence_ids),
+            dataset_version=version,
             completeness="complete",
             confidence=1.0,
         )
