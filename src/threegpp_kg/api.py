@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,8 +15,9 @@ from .config import load_settings
 from .constants import Conclusion, MatchMode
 from .domain import SearchFilters, SearchRequest, TemporalScope
 from .fixtures import demo_repository
+from .graph_view import FacetKind
 from .mcp_server import create_mcp_server
-from .models.client import create_model_client
+from .models.client import create_embedding_client, create_model_client
 from .repository import SqlRepository
 from .security import OidcAuthMiddleware, OidcTokenValidator, TokenValidator
 from .service import KnowledgeService
@@ -34,13 +35,12 @@ def create_app(
     elif settings.database.mode == "sql":
         engine, sessions = create_engine_and_session(settings.database)
         embedding_client = (
-            create_model_client(
+            create_embedding_client(
                 settings.models.embedding,
                 timeout_seconds=settings.models.timeout_seconds,
-                expected_dimensions=settings.models.embedding.dimensions,
                 retries=settings.models.retries,
             )
-            if settings.models.embedding.base_url and settings.models.embedding.model
+            if settings.models.embedding.model
             else None
         )
         rerank_client = (
@@ -70,7 +70,9 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         del app
         async with mcp.session_manager.run():
+            await knowledge.warmup_models()
             yield
+        await knowledge.close_models()
         if engine is not None:
             await engine.dispose()
 
@@ -120,10 +122,11 @@ def create_app(
         return JSONResponse(result.model_dump(mode="json"))
 
     @app.get("/health")
-    async def health() -> dict[str, str]:
+    async def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "dataset_version": await knowledge.repository.active_dataset_version(),
+            "semantic_search": await knowledge.semantic_health(),
         }
 
     @app.post("/api/tdocs/search")
@@ -212,7 +215,7 @@ def create_app(
     ) -> JSONResponse:
         if facet not in {"company", "topic", "specification"}:
             raise HTTPException(status_code=422, detail="unsupported graph facet")
-        result = await knowledge.meeting_facets(meeting_id, facet, q, limit)  # type: ignore[arg-type]
+        result = await knowledge.meeting_facets(meeting_id, cast(FacetKind, facet), q, limit)
         if result is None:
             raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
         return JSONResponse(result.model_dump(mode="json"))
@@ -252,7 +255,10 @@ def create_app(
         if facet not in {"company", "topic", "specification"}:
             raise HTTPException(status_code=422, detail="unsupported graph facet")
         result = await knowledge.working_group_facets(
-            working_group_id, facet, q, limit  # type: ignore[arg-type]
+            working_group_id,
+            cast(FacetKind, facet),
+            q,
+            limit,
         )
         if result is None:
             raise HTTPException(

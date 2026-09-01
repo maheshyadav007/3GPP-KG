@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from datetime import date, timedelta
 from typing import Any, Protocol, TypeVar
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import Text, and_, cast, desc, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
@@ -18,6 +19,7 @@ from .constants import AUTHORITY_RANK, BlockKind, Conclusion, EvidenceAuthority,
 from .domain import (
     DocumentBlock,
     DocumentSectionNode,
+    EmbeddingProfileInfo,
     EvidenceRef,
     Meeting,
     Passage,
@@ -28,8 +30,11 @@ from .domain import (
 )
 from .retrieval import rank_chunks, reciprocal_rank_fusion
 from .storage.database import (
+    ChunkEmbeddingRow,
+    DatasetEmbeddingProfileRow,
     DatasetVersionRow,
     DocumentBlockRow,
+    EmbeddingProfileRow,
     EvidenceRow,
     MeetingRow,
     RetrievalChunkRow,
@@ -39,6 +44,10 @@ from .storage.database import (
 
 class Repository(Protocol):
     async def active_dataset_version(self) -> str: ...
+
+    async def active_embedding_profile(self) -> EmbeddingProfileInfo | None: ...
+
+    async def embedding_status(self) -> dict[str, Any]: ...
 
     async def list_meetings(
         self, working_groups: list[str], request: SearchRequest
@@ -74,6 +83,7 @@ class Repository(Protocol):
         meeting_ids: list[str],
         top_k: int,
         query_embedding: list[float] | None = None,
+        embedding_profile_id: str | None = None,
     ) -> list[Passage]: ...
 
 
@@ -184,6 +194,48 @@ class SqlRepository:
                 )
             raise RuntimeError("no active dataset version")
         return result
+
+    async def active_embedding_profile(self) -> EmbeddingProfileInfo | None:
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            row = await session.execute(
+                select(DatasetEmbeddingProfileRow, EmbeddingProfileRow)
+                .join(
+                    EmbeddingProfileRow,
+                    EmbeddingProfileRow.id == DatasetEmbeddingProfileRow.profile_id,
+                )
+                .where(
+                    DatasetEmbeddingProfileRow.dataset_version_id == version,
+                    DatasetEmbeddingProfileRow.is_active.is_(True),
+                )
+                .limit(1)
+            )
+            result = row.first()
+        if result is None:
+            return None
+        assignment, profile = result
+        return EmbeddingProfileInfo(
+            id=profile.id,
+            provider=profile.provider,
+            model=profile.model,
+            revision=profile.revision,
+            dimensions=profile.dimensions,
+            state=assignment.state,
+            embedded_chunks=assignment.embedded_chunks,
+            total_chunks=assignment.total_chunks,
+        )
+
+    async def embedding_status(self) -> dict[str, Any]:
+        profile = await self.active_embedding_profile()
+        return {
+            "active": profile is not None,
+            "profile": profile.model_dump(mode="json") if profile else None,
+            "coverage": (
+                profile.embedded_chunks / profile.total_chunks
+                if profile and profile.total_chunks
+                else 0.0
+            ),
+        }
 
     async def list_meetings(
         self, working_groups: list[str], request: SearchRequest
@@ -443,8 +495,18 @@ class SqlRepository:
         meeting_ids: list[str],
         top_k: int,
         query_embedding: list[float] | None = None,
+        embedding_profile_id: str | None = None,
     ) -> list[Passage]:
         version = await self.active_dataset_version()
+        active_profile = (
+            await self.active_embedding_profile() if query_embedding is not None else None
+        )
+        if query_embedding is not None and (
+            active_profile is None
+            or (embedding_profile_id is not None and active_profile.id != embedding_profile_id)
+            or len(query_embedding) != active_profile.dimensions
+        ):
+            query_embedding = None
         filters = [RetrievalChunkRow.dataset_version_id == version]
         document_ids = list(tdoc_ids)
         if meeting_ids:
@@ -465,7 +527,7 @@ class SqlRepository:
         async with self.sessions() as session:
             if session.bind and session.bind.dialect.name == "postgresql":
                 return await self._postgres_passages(
-                    session, filters, query, top_k, query_embedding
+                    session, filters, query, top_k, query_embedding, active_profile
                 )
             rows = list(
                 (
@@ -482,7 +544,7 @@ class SqlRepository:
                 text=row.text,
                 section_path=row.section_path,
                 token_count=row.token_count,
-                embedding=row.embedding,
+                embedding=None,
                 evidence_ids=row.evidence_ids,
             )
             for row in rows
@@ -504,6 +566,7 @@ class SqlRepository:
         query: str,
         top_k: int,
         query_embedding: list[float] | None,
+        active_profile: EmbeddingProfileInfo | None,
     ) -> list[Passage]:
         candidate_limit = min(max(top_k * 10, 50), 1000)
         rankings: list[tuple[list[str], float]] = []
@@ -522,13 +585,26 @@ class SqlRepository:
                 ).all()
             )
             rankings.append((lexical_ids, self.retrieval.lexical_weight))
-        if query_embedding is not None:
+        if query_embedding is not None and active_profile is not None:
+            vector_expression = cast(ChunkEmbeddingRow.embedding, Vector(active_profile.dimensions))
             vector_ids = list(
                 (
                     await session.scalars(
                         select(RetrievalChunkRow.id)
-                        .where(and_(*filters), RetrievalChunkRow.embedding.is_not(None))
-                        .order_by(RetrievalChunkRow.embedding.cosine_distance(query_embedding))
+                        .join(
+                            ChunkEmbeddingRow,
+                            and_(
+                                ChunkEmbeddingRow.dataset_version_id
+                                == RetrievalChunkRow.dataset_version_id,
+                                ChunkEmbeddingRow.chunk_id == RetrievalChunkRow.id,
+                            ),
+                        )
+                        .where(
+                            and_(*filters),
+                            ChunkEmbeddingRow.profile_id == active_profile.id,
+                            ChunkEmbeddingRow.dimensions == active_profile.dimensions,
+                        )
+                        .order_by(vector_expression.cosine_distance(query_embedding))
                         .limit(candidate_limit)
                     )
                 ).all()
@@ -552,7 +628,7 @@ class SqlRepository:
         rows = list(
             (
                 await session.scalars(
-                    select(RetrievalChunkRow).where(RetrievalChunkRow.id.in_(fused))
+                    select(RetrievalChunkRow).where(and_(*filters), RetrievalChunkRow.id.in_(fused))
                 )
             ).all()
         )
@@ -654,6 +730,34 @@ class InMemoryRepository:
 
     async def active_dataset_version(self) -> str:
         return self.dataset_version
+
+    async def active_embedding_profile(self) -> EmbeddingProfileInfo | None:
+        dimensions = next(
+            (len(chunk.embedding) for chunk in self.chunks if chunk.embedding is not None), None
+        )
+        if dimensions is None:
+            return None
+        return EmbeddingProfileInfo(
+            id="fixture-embedding",
+            provider="fixture",
+            model="fixture",
+            revision="fixture",
+            dimensions=dimensions,
+            embedded_chunks=sum(chunk.embedding is not None for chunk in self.chunks),
+            total_chunks=len(self.chunks),
+        )
+
+    async def embedding_status(self) -> dict[str, Any]:
+        profile = await self.active_embedding_profile()
+        return {
+            "active": profile is not None,
+            "profile": profile.model_dump(mode="json") if profile else None,
+            "coverage": (
+                profile.embedded_chunks / profile.total_chunks
+                if profile and profile.total_chunks
+                else 0.0
+            ),
+        }
 
     async def list_meetings(
         self, working_groups: list[str], request: SearchRequest
@@ -806,7 +910,9 @@ class InMemoryRepository:
         meeting_ids: list[str],
         top_k: int,
         query_embedding: list[float] | None = None,
+        embedding_profile_id: str | None = None,
     ) -> list[Passage]:
+        del embedding_profile_id
         allowed_tdocs = set(tdoc_ids)
         if meeting_ids:
             allowed_tdocs.update(

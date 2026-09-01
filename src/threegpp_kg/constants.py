@@ -93,6 +93,14 @@ class DatasetState(StrEnum):
     SUPERSEDED = "superseded"
 
 
+class EmbeddingProfileState(StrEnum):
+    BUILDING = "building"
+    VALIDATED = "validated"
+    ACTIVE = "active"
+    FAILED = "failed"
+    SUPERSEDED = "superseded"
+
+
 class MeetingReadiness(StrEnum):
     DISCOVERED = "discovered"
     COLLECTING = "collecting"

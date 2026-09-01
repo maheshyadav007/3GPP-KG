@@ -14,16 +14,27 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "artifact_versions",
-        sa.Column("parse_status", sa.String(length=20), nullable=False, server_default="parsed"),
-    )
-    op.add_column("artifact_versions", sa.Column("parse_error", sa.Text(), nullable=True))
-    op.create_index(
-        "ix_artifact_versions_parse_status",
-        "artifact_versions",
-        ["parse_status"],
-    )
+    inspector = sa.inspect(op.get_bind())
+    columns = {item["name"] for item in inspector.get_columns("artifact_versions")}
+    if "parse_status" not in columns:
+        op.add_column(
+            "artifact_versions",
+            sa.Column(
+                "parse_status",
+                sa.String(length=20),
+                nullable=False,
+                server_default="parsed",
+            ),
+        )
+    if "parse_error" not in columns:
+        op.add_column("artifact_versions", sa.Column("parse_error", sa.Text(), nullable=True))
+    indexes = {item["name"] for item in inspector.get_indexes("artifact_versions")}
+    if "ix_artifact_versions_parse_status" not in indexes:
+        op.create_index(
+            "ix_artifact_versions_parse_status",
+            "artifact_versions",
+            ["parse_status"],
+        )
 
 
 def downgrade() -> None:

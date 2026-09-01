@@ -25,6 +25,14 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1",
 ]
 
+[project.optional-dependencies]
+onnx = [
+  "huggingface-hub>=0.34,<1",
+  "onnxruntime>=1.22,<2",
+  "optimum-onnx[onnxruntime]>=0.0.3,<1",
+  "sentence-transformers[onnx]>=5.1,<6",
+]
+
 [dependency-groups]
 dev = [
   "aiosqlite>=0.20,<1",
@@ -88,7 +96,7 @@ packages = ["threegpp_kg"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["boto3", "botocore.exceptions"]
+module = ["boto3", "botocore.exceptions", "onnxruntime", "sentence_transformers"]
 ignore_missing_imports = true
 
 [tool.mutmut]

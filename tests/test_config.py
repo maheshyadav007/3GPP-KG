@@ -6,7 +6,22 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from threegpp_kg.config import load_organization_aliases, load_settings, load_working_groups
+from threegpp_kg.config import (
+    ModelEndpointConfig,
+    load_organization_aliases,
+    load_settings,
+    load_working_groups,
+)
+
+
+def test_onnx_revision_must_be_an_immutable_commit() -> None:
+    with pytest.raises(ValidationError, match="immutable commit SHA"):
+        ModelEndpointConfig(
+            provider="onnx",
+            model="test/model",
+            revision="main",
+            dimensions=768,
+        )
 
 
 def test_default_configuration_loads() -> None:
@@ -17,11 +32,16 @@ def test_default_configuration_loads() -> None:
     assert settings.chunking.min_tokens <= settings.chunking.target_tokens
     assert settings.evidence_blocks.target_tokens > settings.chunking.target_tokens
     assert settings.redacted()["database"]["url"].startswith("sqlite")
+    assert settings.models.embedding.provider == "onnx"
+    assert settings.models.embedding.model == "ibm-granite/granite-embedding-english-r2"
+    assert settings.models.embedding.dimensions == 768
+    assert settings.models.embedding.revision
 
 
 def test_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
     load_settings.cache_clear()
     monkeypatch.setenv("THREEGPP_EMBEDDING_DIMENSIONS", "1536")
+    monkeypatch.setenv("THREEGPP_EMBEDDING_QUERY_MAX_LENGTH", "384")
     monkeypatch.setenv("THREEGPP_TOPIC_EXTRACTION_ENABLED", "true")
     monkeypatch.setenv("THREEGPP_HTTP_REQUESTS_PER_SECOND", "4.5")
     monkeypatch.setenv("THREEGPP_HTTP_MAX_CONCURRENCY", "8")
@@ -29,6 +49,7 @@ def test_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("THREEGPP_DATABASE_PREVIEW_DATASET_VERSION", "candidate-v1")
     settings = load_settings()
     assert settings.models.embedding.dimensions == 1536
+    assert settings.models.embedding.query_max_length == 384
     assert settings.features.topic_extraction_enabled is True
     assert settings.http.requests_per_second == 4.5
     assert settings.http.max_concurrency == 8

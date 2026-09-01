@@ -181,11 +181,79 @@ class RetrievalChunkRow(Base):
     section_path: Mapped[list[str]] = mapped_column(JSON, default=list)
     token_count: Mapped[int] = mapped_column(Integer)
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    embedding: Mapped[list[float] | None] = mapped_column(
-        Vector(1024).with_variant(JSON(), "sqlite")
+    __table_args__ = (UniqueConstraint("dataset_version_id", "id"),)
+
+
+class EmbeddingProfileRow(Base):
+    __tablename__ = "embedding_profiles"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    model: Mapped[str] = mapped_column(String(255))
+    revision: Mapped[str] = mapped_column(String(100))
+    dimensions: Mapped[int] = mapped_column(Integer)
+    pooling: Mapped[str] = mapped_column(String(20), default="auto")
+    normalize: Mapped[bool] = mapped_column(Boolean, default=True)
+    query_prompt: Mapped[str] = mapped_column(Text, default="")
+    document_prompt: Mapped[str] = mapped_column(Text, default="")
+    onnx_sha256: Mapped[str] = mapped_column(String(64))
+    runtime_version: Mapped[str] = mapped_column(String(40))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
-    __table_args__ = (UniqueConstraint("dataset_version_id", "id"),)
+
+class DatasetEmbeddingProfileRow(Base):
+    __tablename__ = "dataset_embedding_profiles"
+
+    row_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dataset_version_id: Mapped[str] = mapped_column(ForeignKey("dataset_versions.id"), index=True)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("embedding_profiles.id"), index=True)
+    state: Mapped[str] = mapped_column(String(32), index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    total_chunks: Mapped[int] = mapped_column(Integer, default=0)
+    embedded_chunks: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("dataset_version_id", "profile_id"),
+        Index(
+            "ix_dataset_embedding_active",
+            "dataset_version_id",
+            "is_active",
+            unique=True,
+            postgresql_where=(is_active.is_(True)),
+            sqlite_where=(is_active.is_(True)),
+        ),
+    )
+
+
+class ChunkEmbeddingRow(Base):
+    __tablename__ = "chunk_embeddings"
+
+    row_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dataset_version_id: Mapped[str] = mapped_column(ForeignKey("dataset_versions.id"), index=True)
+    chunk_id: Mapped[str] = mapped_column(String(100), index=True)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("embedding_profiles.id"), index=True)
+    dimensions: Mapped[int] = mapped_column(Integer)
+    embedding: Mapped[list[float]] = mapped_column(Vector().with_variant(JSON(), "sqlite"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    __table_args__ = (
+        UniqueConstraint("dataset_version_id", "chunk_id", "profile_id"),
+        Index(
+            "ix_chunk_embeddings_dataset_profile",
+            "dataset_version_id",
+            "profile_id",
+            "chunk_id",
+        ),
+    )
 
 
 class TopicRow(Base):

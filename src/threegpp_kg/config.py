@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -128,6 +129,36 @@ class ModelEndpointConfig(BaseModel):
     dimensions: int | None = Field(None, ge=1)
     api_key: SecretStr | None = None
     batch_size: int = Field(32, ge=1)
+    revision: str | None = None
+    cache_dir: Path = Path("./data/models")
+    onnx_file: str | None = None
+    document_max_length: int = Field(2048, ge=1)
+    query_max_length: int = Field(256, ge=1)
+    pooling: Literal["auto", "cls", "mean"] = "auto"
+    normalize: bool = True
+    query_prompt: str = ""
+    document_prompt: str = ""
+    execution_provider: str = "CPUExecutionProvider"
+    intra_op_threads: int = Field(0, ge=0)
+    inter_op_threads: int = Field(1, ge=1)
+    max_concurrency: int = Field(1, ge=1)
+    query_cache_size: int = Field(4096, ge=0)
+    optimization: Literal["none", "O1", "O2", "O3"] = "O3"
+    download_on_backfill: bool = True
+    runtime_local_files_only: bool = True
+
+    @model_validator(mode="after")
+    def validate_provider(self) -> ModelEndpointConfig:
+        if self.provider == "onnx":
+            if not self.model:
+                raise ValueError("ONNX embedding model must be configured")
+            if not self.revision:
+                raise ValueError("ONNX embedding revision must be pinned")
+            if not re.fullmatch(r"[0-9a-f]{40,64}", self.revision):
+                raise ValueError("ONNX embedding revision must be an immutable commit SHA")
+            if not self.dimensions:
+                raise ValueError("ONNX embedding dimensions must be configured")
+        return self
 
 
 class ModelsConfig(BaseModel):
@@ -255,6 +286,64 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "THREEGPP_EMBEDDING_BASE_URL": ("models", "embedding", "base_url"),
     "THREEGPP_EMBEDDING_MODEL": ("models", "embedding", "model"),
     "THREEGPP_EMBEDDING_DIMENSIONS": ("models", "embedding", "dimensions"),
+    "THREEGPP_EMBEDDING_REVISION": ("models", "embedding", "revision"),
+    "THREEGPP_EMBEDDING_CACHE_DIR": ("models", "embedding", "cache_dir"),
+    "THREEGPP_EMBEDDING_ONNX_FILE": ("models", "embedding", "onnx_file"),
+    "THREEGPP_EMBEDDING_DOCUMENT_MAX_LENGTH": (
+        "models",
+        "embedding",
+        "document_max_length",
+    ),
+    "THREEGPP_EMBEDDING_QUERY_MAX_LENGTH": (
+        "models",
+        "embedding",
+        "query_max_length",
+    ),
+    "THREEGPP_EMBEDDING_BATCH_SIZE": ("models", "embedding", "batch_size"),
+    "THREEGPP_EMBEDDING_POOLING": ("models", "embedding", "pooling"),
+    "THREEGPP_EMBEDDING_NORMALIZE": ("models", "embedding", "normalize"),
+    "THREEGPP_EMBEDDING_QUERY_PROMPT": ("models", "embedding", "query_prompt"),
+    "THREEGPP_EMBEDDING_DOCUMENT_PROMPT": (
+        "models",
+        "embedding",
+        "document_prompt",
+    ),
+    "THREEGPP_EMBEDDING_EXECUTION_PROVIDER": (
+        "models",
+        "embedding",
+        "execution_provider",
+    ),
+    "THREEGPP_EMBEDDING_INTRA_OP_THREADS": (
+        "models",
+        "embedding",
+        "intra_op_threads",
+    ),
+    "THREEGPP_EMBEDDING_INTER_OP_THREADS": (
+        "models",
+        "embedding",
+        "inter_op_threads",
+    ),
+    "THREEGPP_EMBEDDING_MAX_CONCURRENCY": (
+        "models",
+        "embedding",
+        "max_concurrency",
+    ),
+    "THREEGPP_EMBEDDING_QUERY_CACHE_SIZE": (
+        "models",
+        "embedding",
+        "query_cache_size",
+    ),
+    "THREEGPP_EMBEDDING_OPTIMIZATION": ("models", "embedding", "optimization"),
+    "THREEGPP_EMBEDDING_DOWNLOAD_ON_BACKFILL": (
+        "models",
+        "embedding",
+        "download_on_backfill",
+    ),
+    "THREEGPP_EMBEDDING_RUNTIME_LOCAL_FILES_ONLY": (
+        "models",
+        "embedding",
+        "runtime_local_files_only",
+    ),
     "THREEGPP_EMBEDDING_API_KEY": ("models", "embedding", "api_key"),
     "THREEGPP_RERANK_PROVIDER": ("models", "rerank", "provider"),
     "THREEGPP_RERANK_BASE_URL": ("models", "rerank", "base_url"),

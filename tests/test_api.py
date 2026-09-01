@@ -13,7 +13,19 @@ async def test_health_and_evidence_api(service) -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         health = await client.get("/health")
-        assert health.json() == {"status": "ok", "dataset_version": "test-v1"}
+        assert health.json() == {
+            "status": "ok",
+            "dataset_version": "test-v1",
+            "semantic_search": {
+                "active": False,
+                "profile": None,
+                "coverage": 0.0,
+                "configured": False,
+                "model_cached": False,
+                "profile_matches_config": False,
+                "ready": False,
+            },
+        }
         response = await client.get("/api/tdocs/R2-3")
         assert response.status_code == 200
         assert response.json()["evidence"][0]["id"] == "ev-1"

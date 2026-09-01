@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from typing import Any
 
@@ -7,6 +9,7 @@ import httpx
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import ModelEndpointConfig
+from .base import EmbeddingClient
 
 
 class ModelEndpointError(RuntimeError):
@@ -38,6 +41,26 @@ def create_model_client(
     )
 
 
+def create_embedding_client(
+    config: ModelEndpointConfig,
+    *,
+    timeout_seconds: float,
+    retries: int = 2,
+    client: httpx.AsyncClient | None = None,
+) -> EmbeddingClient:
+    if config.provider == "onnx":
+        from .onnx import OnnxEmbeddingClient
+
+        return OnnxEmbeddingClient(config)
+    return create_model_client(
+        config,
+        timeout_seconds=timeout_seconds,
+        expected_dimensions=config.dimensions,
+        retries=retries,
+        client=client,
+    )
+
+
 class OpenAICompatibleClient:
     def __init__(
         self,
@@ -53,6 +76,32 @@ class OpenAICompatibleClient:
         self.expected_dimensions = expected_dimensions or config.dimensions
         self.retries = retries
         self._client = client
+        profile_payload = {
+            "provider": config.provider,
+            "model": config.model,
+            "dimensions": self.expected_dimensions,
+        }
+        digest = hashlib.sha256(json.dumps(profile_payload, sort_keys=True).encode()).hexdigest()
+        self.profile_id = f"emb-{digest[:32]}"
+        self.model_name = config.model or "unconfigured"
+        self.revision = config.revision or "endpoint-managed"
+        self.dimensions = self.expected_dimensions or 0
+
+    def available(self) -> bool:
+        return bool(self.config.base_url and self.config.model)
+
+    async def warmup(self) -> None:
+        await self.embed_queries(["3GPP semantic search warmup"])
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+
+    async def embed_queries(self, texts: list[str]) -> list[list[float]]:
+        return await self.embeddings(texts)
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return await self.embeddings(texts)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}

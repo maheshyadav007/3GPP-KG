@@ -77,7 +77,10 @@ async def test_unconfigured_endpoint_fails_before_network() -> None:
 def test_unavailable_model_provider_fails_explicitly() -> None:
     with pytest.raises(ModelEndpointError, match="not installed"):
         create_model_client(
-            ModelEndpointConfig(provider="onnx", model="local-model"), timeout_seconds=1
+            ModelEndpointConfig(
+                provider="onnx", model="local-model", revision="a" * 40, dimensions=3
+            ),
+            timeout_seconds=1,
         )
 
 

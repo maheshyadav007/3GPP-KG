@@ -16,7 +16,6 @@ from ..config import (
 from ..constants import ArtifactKind, DatasetState, EdgeType, EvidenceAuthority
 from ..domain import DocumentBlock, Meeting, RetrievalChunk, TDoc
 from ..graph import GraphFact, validate_graph
-from ..models.client import OpenAICompatibleClient
 from ..parsers.documents import parse_document
 from ..parsers.spreadsheet import parse_tdoc_workbook_package
 from ..storage.database import (
@@ -325,7 +324,6 @@ async def ingest_document_artifact(
     parser_config: ParserConfig | None = None,
     kind: ArtifactKind = ArtifactKind.TDOC,
     authority: EvidenceAuthority = EvidenceAuthority.TDOC_BODY,
-    embedding_client: OpenAICompatibleClient | None = None,
     ensure_parents: bool = True,
     assume_new: bool = False,
 ) -> tuple[list[DocumentBlock], list[RetrievalChunk]]:
@@ -424,12 +422,6 @@ async def ingest_document_artifact(
                 )
             )
     chunks = build_chunks(blocks, chunking)
-    if embedding_client and chunks:
-        embeddings = await embedding_client.embeddings([chunk.text for chunk in chunks])
-        chunks = [
-            chunk.model_copy(update={"embedding": embedding})
-            for chunk, embedding in zip(chunks, embeddings, strict=True)
-        ]
     existing_chunk_ids: set[str] = set()
     if not assume_new:
         existing_chunk_ids = set(
@@ -458,7 +450,6 @@ async def ingest_document_artifact(
                     section_path=chunk.section_path,
                     token_count=chunk.token_count,
                     evidence_ids=chunk.evidence_ids,
-                    embedding=chunk.embedding,
                 )
             )
     await session.flush()

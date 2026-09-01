@@ -8,7 +8,7 @@ The backend is managed with `uv`; the UI lives in `web/`. Configuration is loade
 ## Development
 
 ```bash
-uv sync --all-groups --no-editable
+uv sync --all-groups --extra onnx --no-editable
 uv run pytest
 uv run threegpp-kg serve
 ```
@@ -38,7 +38,7 @@ Downloaded 3GPP artifacts, PostgreSQL data, generated manifests, and test-run ev
 After cloning, create the Python and frontend environments with:
 
 ```bash
-uv sync --all-groups --no-editable
+uv sync --all-groups --extra onnx --no-editable
 cd web && npm ci && cd ..
 ```
 
@@ -101,6 +101,43 @@ Use the same two environment variables when starting `threegpp-kg serve`. The de
 PostgreSQL full-text and structured retrieval work without a model. pgvector semantic search needs
 embeddings from either a small local embedding model or a configured embedding endpoint; embedding
 and reranking are optional. Only final newsletter prose requires a generative LLM.
+
+## Local ONNX Semantic Search
+
+The portable default is the pinned `ibm-granite/granite-embedding-english-r2` ONNX profile: 768
+dimensions, normalized vectors, CPU execution, 2,048-token documents, and 256-token queries. Model
+artifacts and vectors are never committed. Only an explicit backfill command may download and export
+the model; API processes load the cached ONNX package with local-files-only mode.
+
+```bash
+uv sync --all-groups --extra onnx
+export THREEGPP_DATABASE_MODE=sql
+export THREEGPP_DATABASE_URL=postgresql+asyncpg://localhost:5432/threegpp
+uv run alembic upgrade head
+
+uv run threegpp-kg backfill-embeddings \
+  --dataset-version local-latest-five \
+  --profile default \
+  --activate \
+  --output artifacts/embedding-backfill.json
+
+uv run threegpp-kg benchmark-embeddings \
+  --dataset-version local-latest-five \
+  --sample-size 64 \
+  --output artifacts/embedding-benchmark.json
+```
+
+Embedding profiles are immutable and isolated by dataset. Backfills skip existing vectors, commit
+length-bucketed batches, recover after interruption, validate coverage and vector invariants, build
+a profile-specific HNSW expression index, and atomically switch the active profile. Re-run an older
+cached configuration with `--activate` to roll back. A missing/corrupt model, profile mismatch, or
+inference failure returns lexical results with an explicit `lexical_fallback` warning.
+
+The active profile, revision, dimensions, coverage, cache availability, and readiness are exposed by
+`GET /health`. Passage responses identify the profile and whether retrieval was `hybrid`, `lexical`,
+or `lexical_fallback`. All model, revision, cache, length, batching, pooling, prompt, thread,
+concurrency, and download settings live in `config/defaults.yaml` and documented `THREEGPP_*`
+environment variables.
 
 Document parsers recover detailed Office structure in memory, then coalesce adjacent source
 elements into section-aware evidence blocks before persistence. Evidence blocks target 1,000 tokens

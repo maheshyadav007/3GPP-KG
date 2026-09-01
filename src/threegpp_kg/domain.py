@@ -144,6 +144,22 @@ class Passage(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
 
 
+class EmbeddingProfileInfo(BaseModel):
+    id: str
+    provider: str
+    model: str
+    revision: str
+    dimensions: int = Field(ge=1)
+    state: str = "active"
+    embedded_chunks: int = Field(0, ge=0)
+    total_chunks: int = Field(0, ge=0)
+
+
+class RetrievalMetadata(BaseModel):
+    mode: Literal["hybrid", "lexical", "lexical_fallback"]
+    embedding_profile: EmbeddingProfileInfo | None = None
+
+
 class SearchFilters(BaseModel):
     working_groups: list[str] = Field(default_factory=list)
     companies: list[str] = Field(default_factory=list)
@@ -183,3 +199,4 @@ class Envelope[T](BaseModel):
     confidence: float = Field(1.0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
     next_cursor: str | None = None
+    retrieval: RetrievalMetadata | None = None

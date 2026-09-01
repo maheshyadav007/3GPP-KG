@@ -11,6 +11,7 @@ from .domain import (
     Meeting,
     NewsletterPacket,
     Passage,
+    RetrievalMetadata,
     SearchFilters,
     SearchRequest,
     TDoc,
@@ -18,6 +19,7 @@ from .domain import (
     TemporalScope,
 )
 from .graph_view import FacetKind, build_graph, build_scope_graph, facet_options, filter_tdocs
+from .models.base import EmbeddingClient
 from .models.client import ModelEndpointError, OpenAICompatibleClient
 from .repository import InMemoryRepository, Repository, decode_cursor, encode_cursor
 
@@ -26,7 +28,7 @@ class KnowledgeService:
     def __init__(
         self,
         repository: Repository,
-        embedding_client: OpenAICompatibleClient | None = None,
+        embedding_client: EmbeddingClient | None = None,
         rerank_client: OpenAICompatibleClient | None = None,
     ) -> None:
         self.repository = repository
@@ -353,17 +355,48 @@ class KnowledgeService:
         query_embedding: list[float] | None = None,
     ) -> Envelope[list[Passage]]:
         warnings: list[str] = []
+        active_profile = await self.repository.active_embedding_profile()
+        retrieval_mode = "lexical"
         if query_embedding is None and self.embedding_client and query.strip():
-            try:
-                query_embedding = (await self.embedding_client.embeddings([query]))[0]
-            except (ModelEndpointError, OSError, TimeoutError):
-                warnings.append("Semantic retrieval failed; lexical retrieval was used")
+            if active_profile is None:
+                warnings.append("No active embedding profile; lexical retrieval was used")
+                retrieval_mode = "lexical_fallback"
+            elif active_profile.id != self.embedding_client.profile_id:
+                warnings.append(
+                    "Configured model does not match the active embedding profile; "
+                    "lexical retrieval was used"
+                )
+                retrieval_mode = "lexical_fallback"
+            elif not self.embedding_client.available():
+                warnings.append("Cached ONNX model is unavailable; lexical retrieval was used")
+                retrieval_mode = "lexical_fallback"
+            else:
+                try:
+                    query_embedding = (await self.embedding_client.embed_queries([query]))[0]
+                    retrieval_mode = "hybrid"
+                except (ModelEndpointError, OSError, TimeoutError):
+                    warnings.append("Semantic retrieval failed; lexical retrieval was used")
+                    retrieval_mode = "lexical_fallback"
+        elif query_embedding is not None:
+            if active_profile is not None and len(query_embedding) == active_profile.dimensions:
+                retrieval_mode = "hybrid"
+            else:
+                query_embedding = None
+                retrieval_mode = "lexical_fallback"
+                warnings.append(
+                    "Query embedding does not match an active profile; lexical retrieval was used"
+                )
         passages = await self.repository.search_passages(
             query,
             tdoc_ids=tdoc_ids or [],
             meeting_ids=meeting_ids or [],
             top_k=top_k,
             query_embedding=query_embedding,
+            embedding_profile_id=(
+                self.embedding_client.profile_id
+                if query_embedding is not None and self.embedding_client
+                else (active_profile.id if query_embedding is not None and active_profile else None)
+            ),
         )
         if self.rerank_client and passages:
             try:
@@ -387,7 +420,41 @@ class KnowledgeService:
             warnings=warnings
             if passages
             else [*warnings, "No evidence-bearing passages matched the query"],
+            retrieval=RetrievalMetadata(
+                mode=retrieval_mode,
+                embedding_profile=active_profile if retrieval_mode == "hybrid" else None,
+            ),
         )
+
+    async def warmup_models(self) -> None:
+        if self.embedding_client and self.embedding_client.available():
+            try:
+                await self.embedding_client.warmup()
+            except (ModelEndpointError, OSError, TimeoutError):
+                return
+
+    async def close_models(self) -> None:
+        if self.embedding_client:
+            await self.embedding_client.close()
+        if self.rerank_client and self.rerank_client is not self.embedding_client:
+            await self.rerank_client.close()
+
+    async def semantic_health(self) -> dict[str, Any]:
+        database_status = await self.repository.embedding_status()
+        configured = self.embedding_client is not None
+        cached = bool(self.embedding_client and self.embedding_client.available())
+        profile_matches = bool(
+            self.embedding_client
+            and database_status["profile"]
+            and database_status["profile"]["id"] == self.embedding_client.profile_id
+        )
+        return {
+            **database_status,
+            "configured": configured,
+            "model_cached": cached,
+            "profile_matches_config": profile_matches,
+            "ready": bool(database_status["active"] and cached and profile_matches),
+        }
 
     async def revision_chain(self, tdoc_id: str) -> Envelope[list[str]]:
         if isinstance(self.repository, InMemoryRepository):

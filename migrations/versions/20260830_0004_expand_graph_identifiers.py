@@ -16,20 +16,18 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.alter_column(
-        "knowledge_edges",
-        "source_id",
-        existing_type=sa.String(length=100),
-        type_=sa.String(length=160),
-        existing_nullable=False,
-    )
-    op.alter_column(
-        "knowledge_edges",
-        "target_id",
-        existing_type=sa.String(length=100),
-        type_=sa.String(length=160),
-        existing_nullable=False,
-    )
+    columns = {
+        item["name"]: item for item in sa.inspect(op.get_bind()).get_columns("knowledge_edges")
+    }
+    for name in ("source_id", "target_id"):
+        if getattr(columns[name]["type"], "length", None) != 160:
+            op.alter_column(
+                "knowledge_edges",
+                name,
+                existing_type=columns[name]["type"],
+                type_=sa.String(length=160),
+                existing_nullable=False,
+            )
 
 
 def downgrade() -> None:

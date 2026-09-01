@@ -62,12 +62,29 @@ models:
   timeout_seconds: 60
   retries: 2
   embedding:
-    provider: openai_compatible
+    provider: onnx
     base_url: null
-    model: null
-    dimensions: 1024
+    model: ibm-granite/granite-embedding-english-r2
+    revision: 47ea694b257b703fee9253d75c2b1f2985180498
+    dimensions: 768
     api_key: null
-    batch_size: 32
+    batch_size: 16
+    cache_dir: ./data/models
+    onnx_file: null
+    document_max_length: 2048
+    query_max_length: 256
+    pooling: auto
+    normalize: true
+    query_prompt: ""
+    document_prompt: ""
+    execution_provider: CPUExecutionProvider
+    intra_op_threads: 0
+    inter_op_threads: 1
+    max_concurrency: 1
+    query_cache_size: 4096
+    optimization: O3
+    download_on_backfill: true
+    runtime_local_files_only: true
   rerank:
     provider: openai_compatible
     base_url: null

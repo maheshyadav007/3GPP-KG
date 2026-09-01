@@ -9,6 +9,7 @@ import uvicorn
 
 from .backfill import BackfillRequest, run_backfill
 from .config import load_settings, load_working_groups
+from .embedding_backfill import benchmark_cached_embeddings, run_embedding_backfill
 from .graph_repair import rebuild_graph
 from .local_ingest import ingest_local_manifests
 from .mirror import benchmark_download_concurrency, mirror_working_group
@@ -77,6 +78,20 @@ def main() -> None:
     )
     rebuild.add_argument("--dataset-version", required=True)
     rebuild.add_argument("--output", type=Path)
+    embedding_backfill = subparsers.add_parser(
+        "backfill-embeddings",
+        help="download the configured ONNX model and resumably embed a dataset",
+    )
+    embedding_backfill.add_argument("--dataset-version", required=True)
+    embedding_backfill.add_argument("--profile", choices=["default"], default="default")
+    embedding_backfill.add_argument("--activate", action="store_true")
+    embedding_backfill.add_argument("--output", type=Path)
+    embedding_benchmark = subparsers.add_parser(
+        "benchmark-embeddings", help="benchmark the cached ONNX model on dataset chunks"
+    )
+    embedding_benchmark.add_argument("--dataset-version", required=True)
+    embedding_benchmark.add_argument("--sample-size", type=int, default=64)
+    embedding_benchmark.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -201,6 +216,26 @@ def main() -> None:
                 json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "backfill-embeddings":
+        result = asyncio.run(
+            run_embedding_backfill(load_settings(), args.dataset_version, activate=args.activate)
+        )
+        _write_optional_json(args.output, result)
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "benchmark-embeddings":
+        result = asyncio.run(
+            benchmark_cached_embeddings(
+                load_settings(), args.dataset_version, sample_size=args.sample_size
+            )
+        )
+        _write_optional_json(args.output, result)
+        print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _write_optional_json(output: Path | None, result: dict[str, object]) -> None:
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 async def _activate_existing_dataset(dataset_version_id: str) -> dict[str, object]:

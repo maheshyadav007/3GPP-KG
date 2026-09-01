@@ -100,7 +100,7 @@ the graph and presented the reader as an overlay.
 
 ## Incremental verification: working-group revision graph
 
-- Verification date: 2026-09-01
+- Verification date: 2026-09-02
 - Candidate dataset: `latest5-all-wgs-20260830-v2`
 - Scope: complete WG projection, cross-meeting revision resolution, longest-chain calculation and
   Meeting/Working group UI scope selection
@@ -126,6 +126,49 @@ The local API and frontend component/build paths were verified, but a new intera
 screenshot was not captured because the browser-control backend was unavailable during this run.
 The 2.17-second first request is slightly above the two-second production target and needs a
 networked repeated-load measurement before production classification can be raised.
+
+## Incremental verification: local ONNX semantic search
+
+- Verification date: 2026-09-01
+- Proof root: `artifacts/test-runs/semantic-pre-migration-20260901T161014Z/` (local, ignored by Git)
+- Model: `ibm-granite/granite-embedding-english-r2`
+- Immutable revision: `47ea694b257b703fee9253d75c2b1f2985180498`
+- Profile: `emb-0bdf6b54f20827a5de1b924c14a03f0b` (768 dimensions, normalized, O3 ONNX)
+- Dataset: `ran2-20260829-canary-134` (789 chunks in four parsed documents)
+- Reference host: Apple M4, local PostgreSQL 17 with pgvector
+
+| Check | Result | Classification |
+|---|---:|---|
+| Python suite | 181 passed, including two PostgreSQL integration tests | PASS |
+| Ruff / strict mypy / migration drift | Ruff passed; mypy passed for 42 source files; Alembic reported no new operations | PASS |
+| Repository-wide coverage | 79.11% combined line/branch score; below configured 85% gate | NOT READY |
+| Resumable real backfill | 789/789 vectors; 100% coverage; initial immutable-profile build took 552 s; second run embedded 0 duplicate chunks and completed in 0.081 s | READY |
+| Profile-specific HNSW | Valid partial expression index built for the 768-dimensional profile | READY |
+| ONNX/reference parity | Minimum cosine 0.99999988; maximum absolute difference 0.0000444 across three technical queries | PASS |
+| Warm single-query latency | p50 63.7 ms; p95 83.9 ms | PASS (<250 ms) |
+| Document throughput | 2.08 retrieval chunks/s for a 64-chunk mixed-length sample | READY WITH LIMITATIONS |
+| Runtime memory | 3.88 GB maximum RSS; 3.11 GB peak footprint reported during benchmark process | READY WITH LIMITATIONS |
+| Eight-request concurrency gate | 16 requests; p50 896 ms; p95 930 ms; 8.83 requests/s; 0 errors | PASS (<2 s) |
+| Hybrid/evidence behavior | 16/16 responses reported `hybrid`, 16/16 returned evidence, and health matched the active profile | PASS |
+| PostgreSQL integration | Variable 2D/3D profiles, two HNSW indexes, profile isolation, ranking, atomic switch, and advisory-lock/index regression passed | PASS |
+| Migration exercises | Existing legacy vectors preserved; fresh install, downgrade/upgrade, and Alembic drift checks passed | PASS |
+| Offline provider tests | Revision pinning, acquisition/export mocks, checksums, path safety, pooling, batching, normalization, malformed vectors, interruption, idempotency, failure state, and lexical fallback passed | PASS |
+| 150-question expert Evidence Recall@10 | NOT RUN: no expert-authored and adjudicated question set exists; this canary has only four parsed documents | NOT READY |
+| Challenger comparison | 311M and 97M Granite profiles were not backfilled or quality-scored | NOT READY |
+| Production 50 RPS gate | Not run; production server hardware is undefined | NOT READY |
+
+The first real index build exposed a self-deadlock: the advisory-lock query had opened a transaction,
+and `CREATE INDEX CONCURRENTLY` waited for that same transaction. The blocked index statement was
+cancelled without losing vectors. The lock now uses autocommit, invalid indexes are removed before a
+retry, a regression integration test enforces a five-second completion bound, and the resumed run
+reused all 789 vectors. This failure-and-recovery evidence supports resumability; it does not replace
+a longer operational soak. A prior valid profile remains stored as `superseded`, while the corrected
+profile identity includes ONNX optimization, selected file, and execution provider.
+
+The runtime and PostgreSQL mechanisms are **READY WITH LIMITATIONS**. Latency and parity gates pass,
+but retrieval quality is not production-approved. The canary cannot support an honest expert
+Evidence Recall@10 claim because only four source documents have chunks. A synthetic query set would
+not be equivalent to expert adjudication, so the report leaves this mandatory gate open.
 
 ## Readiness conclusion
 
@@ -175,7 +218,7 @@ evidence, retrieval, and publication modules meet or exceed 85% branch coverage.
 | Configuration and WG adapters | READY WITH LIMITATIONS | Typed, centralized configuration and data-driven RAN2/RAN3/SA2 adapters pass unit and live listing tests. Full backfill is unverified. |
 | Download, parse, normalize, chunk | READY WITH LIMITATIONS | Idempotency, conditional fetch, security limits, XLSX/DOCX/PDF/ZIP and stable evidence chunks pass fixtures. Legacy `.doc` conversion is fail-closed but not implemented. |
 | Graph and evidence model | READY WITH LIMITATIONS | Direction, cycle, orphan, temporal and evidence contracts pass. Cross-WG accuracy has not been measured on a full corpus. |
-| Hybrid retrieval | READY WITH LIMITATIONS | Exact, native PostgreSQL full-text, pgvector ordering, vector fusion, authority and filters pass. Expert Recall@10 remains unverified. |
+| Hybrid retrieval | READY WITH LIMITATIONS | Pinned local ONNX, profile isolation, resumable vectors, HNSW, fallback, parity and M4 latency pass. Expert Recall@10 and challenger comparison remain unverified. |
 | MCP/API/OIDC | READY WITH LIMITATIONS | Required tools, envelopes, temporal argument rules, pagination, bounds and OIDC validation pass tests. No deployed identity-provider integration or network soak test. |
 | Scheduler and publication | READY WITH LIMITATIONS | Idempotent jobs, leases, reclaim, retry and dead-letter pass component tests; atomic activation also passes PostgreSQL. Continuous operation is unverified. |
 | Deterministic newsletter packet | READY WITH LIMITATIONS | Evidence-backed packet generation and publication guards pass. Corpus-level usefulness has not been evaluated by domain experts. |
@@ -195,6 +238,7 @@ evidence, retrieval, and publication modules meet or exceed 85% branch coverage.
 | Revision graph integrity and temporal relationships | graph validation | orphan, direction, cycle and valid-chain tests | PASS; 94.44% branch coverage | JUnit, mutation |
 | Dataset validation and atomic activation | pipeline, publisher | idempotent ingestion, publisher guards and PostgreSQL integration test | PASS on SQLite and PostgreSQL | JUnit |
 | Exact, lexical, vector and hybrid retrieval | retrieval, repository | scoring, RRF, pgvector, PostgreSQL FTS, filters, temporal scope and service tests | PASS locally | JUnit, mutation |
+| Versioned local ONNX profiles and resumable backfill | ONNX provider, embedding backfill, profile schema | `test_onnx_*`, `test_backfill_*`, PostgreSQL multi-profile and advisory-lock tests | PASS with quality limitation | local ONNX proof root, JUnit |
 | Every factual tool result includes evidence and dataset version | MCP contracts and service | `test_every_mcp_tool_executes_with_evidence_envelope`, passage evidence test | PASS in fixtures | JUnit, MCP transcripts |
 | Required MCP tool inventory and argument rules | MCP server, domain schemas | tool registration, temporal exclusivity and cursor tests | PASS | JUnit |
 | OIDC/OAuth and bounded API behavior | security middleware, API | OIDC discovery/JWKS, protected routes, graph bounds and missing document tests | PASS with mocks | JUnit |
@@ -217,7 +261,7 @@ evidence, retrieval, and publication modules meet or exceed 85% branch coverage.
 | Reprocessing creates no duplicate records | PASS IN FIXTURES | End-to-end idempotent ingestion passes; full-corpus PostgreSQL reprocessing remains unverified. |
 | Interrupted ingestion recovers without manual repair | PASS IN COMPONENT TESTS | Expired leases, retry and dead-letter behavior pass; no production crash drill. |
 | Concurrent reads observe one complete dataset version | PASS IN INTEGRATION TEST | PostgreSQL row locking and atomic active-version replacement pass; concurrent reader soak remains pending. |
-| 300 users/50 reads per second, metadata p95 under 500 ms and retrieval p95 under 2 s | NOT RUN AS PRODUCTION TEST | In-process fixture probe exceeded targets, but the networked PostgreSQL corpus path was not load-tested. |
+| 300 users/50 reads per second, metadata p95 under 500 ms and retrieval p95 under 2 s | PARTIAL | Local ONNX hybrid retrieval passed at eight concurrent requests with p95 835 ms, but the production 50 RPS/network/hardware gate remains untested. |
 | Clean install, backfill, update, rollback, backup and restore | PARTIAL | Local PostgreSQL installation, migration and fixture backup/restore pass; corpus backfill, rollback and filesystem restore remain. |
 
 ## Security and operational findings
@@ -241,15 +285,15 @@ encryption, retention and snapshot restoration.
 4. Resolve the high-severity UI dependency advisories and capture formal accessibility evidence.
 5. Run networked load, failover, rollback, point-in-time database recovery and full filesystem
    snapshot restoration exercises.
-6. Evaluate optional local/endpoint embeddings and reranking for retrieval quality. These are
-   non-generative and may remain disabled without breaking structured or full-text retrieval.
+6. Expert-score the pinned 149M embedding profile and the 311M/97M challengers. Retain the default
+   only if Evidence Recall@10 reaches 90% and the challenger policy is satisfied.
 7. Run the separate live generative-model evaluation before enabling newsletter prose. Newsletter
    generation must remain disabled until that gate passes.
 
 ## Reproduction
 
 ```bash
-uv sync --all-groups --no-editable
+uv sync --all-groups --extra onnx --no-editable
 uv run ruff check .
 uv run mypy src/threegpp_kg
 uv run pytest --cov=threegpp_kg --cov-branch
