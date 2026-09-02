@@ -13,6 +13,8 @@ class ArtifactKind(StrEnum):
     TDOC_LIST = "tdoc_list"
     TDOC = "tdoc"
     REPORT = "report"
+    CHAIR_NOTES = "chair_notes"
+    POST_MEETING_DISCUSSION = "post_meeting_discussion"
     LIAISON = "liaison"
     OTHER = "other"
 
@@ -38,7 +40,9 @@ class Conclusion(StrEnum):
 class EvidenceAuthority(StrEnum):
     APPROVED_REPORT = "approved_report"
     FINAL_REPORT = "final_report"
+    CHAIR_NOTES = "chair_notes"
     MEETING_EXPORT = "meeting_export"
+    POST_MEETING_DISCUSSION = "post_meeting_discussion"
     DRAFT_REPORT = "draft_report"
     TDOC_BODY = "tdoc_body"
     MODEL_INFERENCE = "model_inference"
@@ -47,11 +51,41 @@ class EvidenceAuthority(StrEnum):
 AUTHORITY_RANK: dict[EvidenceAuthority, int] = {
     EvidenceAuthority.APPROVED_REPORT: 100,
     EvidenceAuthority.FINAL_REPORT: 90,
+    EvidenceAuthority.CHAIR_NOTES: 85,
     EvidenceAuthority.MEETING_EXPORT: 80,
+    EvidenceAuthority.POST_MEETING_DISCUSSION: 75,
     EvidenceAuthority.DRAFT_REPORT: 70,
     EvidenceAuthority.TDOC_BODY: 60,
     EvidenceAuthority.MODEL_INFERENCE: 10,
 }
+
+
+class SourceRole(StrEnum):
+    AGENDA = "agenda"
+    TDOC_LIST = "tdoc_list"
+    TDOC = "tdoc"
+    REPORT = "report"
+    CHAIR_NOTES = "chair_notes"
+    POST_MEETING_DISCUSSION = "post_meeting_discussion"
+    OTHER = "other"
+
+
+class DocumentState(StrEnum):
+    WORKING = "working"
+    FINAL_CLEAN = "final_clean"
+    SUBMITTED_FOR_APPROVAL = "submitted_for_approval"
+    APPROVED = "approved"
+    PUBLISHED = "published"
+
+
+class ObservationType(StrEnum):
+    DECISION = "decision"
+    DISCUSSION_SUMMARY = "discussion_summary"
+    OPEN_ISSUE = "open_issue"
+    FOLLOW_UP_ACTION = "follow_up_action"
+    INTENDED_OUTCOME = "intended_outcome"
+    DEADLINE = "deadline"
+    DEPENDENCY = "dependency"
 
 
 MIN_DATASET_INGESTION_COVERAGE = 0.995
@@ -79,6 +113,7 @@ class EdgeType(StrEnum):
     TARGETS_RELEASE = "targets_release"
     RELATED_TO_WORK_ITEM = "related_to_work_item"
     MENTIONS_TOPIC = "mentions_topic"
+    MENTIONS_TDOC = "mentions_tdoc"
     CONCLUDES_TDOC = "concludes_tdoc"
     REPORTS_ON = "reports_on"
     SUPERSEDES = "supersedes"

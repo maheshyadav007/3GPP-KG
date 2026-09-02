@@ -3,17 +3,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from typing import Any
+from typing import Any, Literal
 
 from .config import FeatureConfig, NewsletterConfig
 from .constants import (
+    AUTHORITY_RANK,
     NEWSLETTER_PROMPT_VERSION,
     MatchMode,
     NewsletterStatus,
+    ObservationType,
 )
 from .domain import (
     Envelope,
     Meeting,
+    MeetingBriefing,
+    MeetingObservation,
+    MeetingObservationChange,
+    MeetingSource,
     NewsletterPacket,
     NewsletterRecord,
     Passage,
@@ -496,6 +502,256 @@ class KnowledgeService:
             warnings=[] if evidence or not chain else ["Revision chain has no source evidence"],
         )
 
+    async def meeting_sources(
+        self, meeting_id: str
+    ) -> Envelope[list[MeetingSource]]:
+        meeting = await self.repository.meeting(meeting_id)
+        version = await self.repository.active_dataset_version()
+        if meeting is None:
+            return Envelope(
+                data=[],
+                dataset_version=version,
+                completeness="unavailable",
+                confidence=0,
+                warnings=[f"Meeting {meeting_id} was not found"],
+            )
+        sources = await self.repository.meeting_sources(meeting.id)
+        return Envelope(
+            data=sources,
+            dataset_version=version,
+            completeness="complete" if sources else "unavailable",
+            confidence=1 if sources else 0,
+            warnings=[] if sources else ["No high-value meeting sources have been ingested"],
+        )
+
+    async def meeting_source_content(
+        self,
+        meeting_id: str,
+        document_id: str,
+        *,
+        block_limit: int = 500,
+        cursor: str | None = None,
+    ) -> Envelope[dict[str, Any] | None]:
+        sources = await self.repository.meeting_sources(meeting_id)
+        source = next((item for item in sources if item.document_id == document_id), None)
+        version = await self.repository.active_dataset_version()
+        if source is None:
+            return Envelope(
+                data=None,
+                dataset_version=version,
+                completeness="unavailable",
+                confidence=0,
+                warnings=[f"Meeting source document {document_id} was not found"],
+            )
+        offset = decode_cursor(cursor)
+        blocks = await self.repository.document_blocks(
+            document_id, offset=offset, limit=block_limit + 1
+        )
+        has_more = len(blocks) > block_limit
+        selected = blocks[:block_limit]
+        observations = [
+            item
+            for item in await self.repository.meeting_observations(meeting_id)
+            if item.artifact_version_id == source.artifact_version_id
+        ]
+        evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for item in observations
+                for evidence_id in item.evidence_ids
+            )
+        )
+        return Envelope(
+            data={
+                "source": source.model_dump(mode="json"),
+                "blocks": [block.model_dump(mode="json") for block in selected],
+                "observations": [item.model_dump(mode="json") for item in observations],
+            },
+            evidence=await self.repository.evidence(evidence_ids),
+            dataset_version=version,
+            completeness="partial" if has_more else "complete",
+            confidence=1,
+            next_cursor=encode_cursor(offset + block_limit) if has_more else None,
+        )
+
+    async def meeting_briefing(
+        self, meeting_id: str, edition: str = "provisional"
+    ) -> Envelope[MeetingBriefing | None]:
+        if edition not in {"provisional", "final"}:
+            raise ValueError("edition must be provisional or final")
+        version = await self.repository.active_dataset_version()
+        meeting = await self.repository.meeting(meeting_id)
+        if meeting is None:
+            return Envelope(
+                data=None,
+                dataset_version=version,
+                completeness="unavailable",
+                confidence=0,
+                warnings=[f"Meeting {meeting_id} was not found"],
+            )
+        sources = await self.repository.meeting_sources(meeting.id)
+        observations = await self.repository.meeting_observations(meeting.id)
+        briefing = self._build_meeting_briefing(
+            meeting,
+            sources,
+            observations,
+            "final" if edition == "final" else "provisional",
+        )
+        evidence = await self.repository.evidence(briefing.evidence_ids)
+        warnings: list[str] = []
+        if not sources:
+            warnings.append("No high-value meeting sources have been ingested")
+        if sources and not observations:
+            warnings.append("Meeting sources contain no extracted observations")
+        if edition == "final" and not any(
+            source.source_role == "report" for source in briefing.sources
+        ):
+            warnings.append("Final report evidence is not yet available")
+        return Envelope(
+            data=briefing,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if briefing.observations and not warnings else "partial",
+            confidence=(
+                max(
+                    (
+                        AUTHORITY_RANK[item.authority] / 100
+                        for item in briefing.observations
+                    ),
+                    default=0,
+                )
+            ),
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def _build_meeting_briefing(
+        meeting: Meeting,
+        sources: list[MeetingSource],
+        observations: list[MeetingObservation],
+        edition: Literal["provisional", "final"],
+    ) -> MeetingBriefing:
+        by_logical: dict[str, list[MeetingSource]] = {}
+        for source in sources:
+            by_logical.setdefault(source.logical_document_id, []).append(source)
+        selected_sources: list[MeetingSource] = []
+        changes: list[MeetingObservationChange] = []
+        observations_by_artifact: dict[str, list[MeetingObservation]] = {}
+        for item in observations:
+            observations_by_artifact.setdefault(item.artifact_version_id, []).append(item)
+        for logical_id, versions in sorted(by_logical.items()):
+            ordered = sorted(
+                versions,
+                key=lambda item: (item.observed_at, item.artifact_version_id),
+            )
+            current = ordered[-1]
+            selected_sources.append(current)
+            if len(ordered) < 2:
+                continue
+            previous = ordered[-2]
+            before_items = observations_by_artifact.get(previous.artifact_version_id, [])
+            after_items = observations_by_artifact.get(current.artifact_version_id, [])
+            before_by_hash = {
+                (item.observation_key, item.content_hash): item for item in before_items
+            }
+            after_by_hash = {
+                (item.observation_key, item.content_hash): item for item in after_items
+            }
+            before_by_key = {item.observation_key: item for item in before_items}
+            after_by_key = {item.observation_key: item for item in after_items}
+            changed_keys = {
+                key
+                for key in before_by_key.keys() & after_by_key.keys()
+                if before_by_key[key].content_hash != after_by_key[key].content_hash
+            }
+            changes.extend(
+                MeetingObservationChange(
+                    change_type="changed",
+                    logical_document_id=logical_id,
+                    before=before_by_key[key],
+                    after=after_by_key[key],
+                )
+                for key in sorted(changed_keys)
+            )
+            changes.extend(
+                MeetingObservationChange(
+                    change_type="removed",
+                    logical_document_id=logical_id,
+                    before=item,
+                )
+                for content_key, item in sorted(before_by_hash.items())
+                if content_key not in after_by_hash
+                and item.observation_key not in changed_keys
+            )
+            changes.extend(
+                MeetingObservationChange(
+                    change_type="added",
+                    logical_document_id=logical_id,
+                    after=item,
+                )
+                for content_key, item in sorted(after_by_hash.items())
+                if content_key not in before_by_hash
+                and item.observation_key not in changed_keys
+            )
+
+        if edition == "provisional" and any(
+            source.source_role != "report" for source in selected_sources
+        ):
+            selected_sources = [
+                source for source in selected_sources if source.source_role != "report"
+            ]
+        selected_artifacts = {source.artifact_version_id for source in selected_sources}
+        selected_observations = [
+            item for item in observations if item.artifact_version_id in selected_artifacts
+        ]
+        best_by_content: dict[tuple[str, str], MeetingObservation] = {}
+        for item in selected_observations:
+            content_key = (item.observation_key, item.content_hash)
+            current = best_by_content.get(content_key)
+            if current is None or AUTHORITY_RANK[item.authority] > AUTHORITY_RANK[
+                current.authority
+            ]:
+                best_by_content[content_key] = item
+        deduplicated = sorted(
+            best_by_content.values(),
+            key=lambda item: (
+                item.effective_at.isoformat() if item.effective_at else "",
+                -AUTHORITY_RANK[item.authority],
+                item.id,
+            ),
+        )
+        evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for item in deduplicated
+                for evidence_id in item.evidence_ids
+            )
+        )
+        return MeetingBriefing(
+            meeting=meeting,
+            edition=edition,
+            sources=selected_sources,
+            observations=deduplicated,
+            decisions=[
+                item
+                for item in deduplicated
+                if item.observation_type == ObservationType.DECISION
+            ],
+            open_issues=[
+                item
+                for item in deduplicated
+                if item.observation_type == ObservationType.OPEN_ISSUE
+            ],
+            follow_up_actions=[
+                item
+                for item in deduplicated
+                if item.observation_type == ObservationType.FOLLOW_UP_ACTION
+            ],
+            timeline=deduplicated,
+            changes=changes,
+            evidence_ids=evidence_ids,
+        )
+
     async def _revision_chain_generic(self, tdoc_id: str) -> list[str]:
         current = await self.repository.get_tdoc(tdoc_id)
         if not current:
@@ -554,12 +810,17 @@ class KnowledgeService:
         tdocs_by_meeting = {
             item.id: await self.repository.meeting_tdocs(item.id) for item in comparison_meetings
         }
+        briefing_envelope = await self.meeting_briefing(meeting.id, edition)
+        briefing = briefing_envelope.data
         all_evidence_ids = list(
             dict.fromkeys(
-                evidence_id
-                for selected in tdocs_by_meeting.values()
-                for tdoc in selected
-                for evidence_id in tdoc.evidence_ids
+                [
+                    evidence_id
+                    for selected in tdocs_by_meeting.values()
+                    for tdoc in selected
+                    for evidence_id in tdoc.evidence_ids
+                ]
+                + (briefing.evidence_ids if briefing else [])
             )
         )
         evidence = await self.repository.evidence(all_evidence_ids)
@@ -570,6 +831,7 @@ class KnowledgeService:
             tdocs_by_meeting=tdocs_by_meeting,
             evidence=evidence,
             edition="final" if edition == "final" else "provisional",
+            meeting_briefing=briefing,
             provisional_packet=(
                 provisional.packet
                 if edition == "final"

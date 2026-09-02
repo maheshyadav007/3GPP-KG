@@ -20,6 +20,8 @@ from .domain import (
     Envelope,
     EvidenceRef,
     Meeting,
+    MeetingBriefing,
+    MeetingObservation,
     NewsletterDelta,
     NewsletterPacket,
     NewsletterSignal,
@@ -100,6 +102,18 @@ def _signal_id(category: str, key: str, tdoc_ids: list[str]) -> str:
     return f"signal-{hashlib.sha256(body.encode()).hexdigest()[:20]}"
 
 
+def _observation_label(item: MeetingObservation) -> str:
+    return {
+        "decision": "Chair decision",
+        "discussion_summary": "Chair discussion",
+        "open_issue": "Open issue",
+        "follow_up_action": "Follow-up action",
+        "intended_outcome": "Intended outcome",
+        "deadline": "Deadline",
+        "dependency": "Dependency",
+    }[item.observation_type]
+
+
 def _score(
     tdocs: list[TDoc],
     *,
@@ -167,6 +181,7 @@ class NewsletterPacketBuilder:
         evidence: list[EvidenceRef],
         edition: Literal["provisional", "final"],
         provisional_packet: NewsletterPacket | None = None,
+        meeting_briefing: MeetingBriefing | None = None,
         generated_at: datetime | None = None,
     ) -> NewsletterPacket:
         current = sorted(tdocs_by_meeting.get(meeting.id, []), key=lambda item: item.id)
@@ -211,6 +226,7 @@ class NewsletterPacketBuilder:
             self._impact_signals(technical_impacts, by_id, evidence_by_id, revision_depth)
         )
         signals.extend(self._revision_signals(revision_analysis, by_id, evidence_by_id))
+        signals.extend(self._observation_signals(meeting_briefing))
         signals = self._deduplicate_and_rank(signals)
         implications, watch_items = self._implications_and_watch_items(
             trends, revision_analysis, technical_impacts, current, by_id, evidence_by_id
@@ -272,7 +288,13 @@ class NewsletterPacketBuilder:
             "generated_at": generated_at or datetime.now(UTC),
             "comparison_meetings": ordered_meetings,
             "comparison_window": len(ordered_meetings),
-            "totals": {"tdocs": len(current), **dict(Counter(t.status.value for t in current))},
+            "totals": {
+                "tdocs": len(current),
+                "meeting_observations": len(meeting_briefing.observations)
+                if meeting_briefing
+                else 0,
+                **dict(Counter(t.status.value for t in current)),
+            },
             "decisions": status_groups,
             "hot_topics": [
                 {
@@ -323,6 +345,60 @@ class NewsletterPacketBuilder:
         packet_data["provisional_to_final"] = self._delta(packet_data, provisional_packet)
         packet_data["id"] = self.packet_id(packet_data)
         return NewsletterPacket.model_validate(packet_data)
+
+    def _observation_signals(
+        self, briefing: MeetingBriefing | None
+    ) -> list[NewsletterSignal]:
+        if briefing is None:
+            return []
+        signals: list[NewsletterSignal] = []
+        for item in briefing.observations:
+            if not item.evidence_ids:
+                continue
+            authority = AUTHORITY_RANK[item.authority] / 100
+            final_status = 1.0 if item.observation_type == "decision" else 0.7
+            specification_impact = 1.0 if item.specification_ids else 0.0
+            type_weight = {
+                "decision": 1.0,
+                "open_issue": 0.9,
+                "follow_up_action": 0.85,
+                "deadline": 0.85,
+                "dependency": 0.75,
+                "intended_outcome": 0.65,
+                "discussion_summary": 0.55,
+            }[item.observation_type]
+            total = 100 * (
+                0.4 * authority
+                + 0.25 * final_status
+                + 0.15 * specification_impact
+                + 0.2 * type_weight
+            )
+            context = item.tdoc_ids[0] if item.tdoc_ids else item.agenda_item or "meeting"
+            signals.append(
+                NewsletterSignal(
+                    id=_signal_id(
+                        f"meeting_{item.observation_type}",
+                        item.content_hash,
+                        item.tdoc_ids,
+                    ),
+                    category=f"meeting_{item.observation_type}",
+                    headline=f"{_observation_label(item)}: {context}",
+                    detail=item.text,
+                    tdoc_ids=item.tdoc_ids,
+                    evidence_ids=item.evidence_ids,
+                    score=SignalScore(
+                        authority=authority,
+                        final_status=final_status,
+                        revision_depth=0,
+                        cross_company=0,
+                        specification_impact=specification_impact,
+                        novelty=type_weight,
+                        persistence=0,
+                        total=round(total, 3),
+                    ),
+                )
+            )
+        return signals
 
     @staticmethod
     def packet_id(packet_data: dict[str, Any]) -> str:

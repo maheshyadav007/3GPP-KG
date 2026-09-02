@@ -68,6 +68,11 @@ class ArtifactVersionRow(Base):
     dataset_version_id: Mapped[str] = mapped_column(ForeignKey("dataset_versions.id"), index=True)
     meeting_id: Mapped[str] = mapped_column(String(80), index=True)
     kind: Mapped[str] = mapped_column(String(32), index=True)
+    source_role: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    logical_document_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    document_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    document_state: Mapped[str] = mapped_column(String(32), default="published", index=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     source_url: Mapped[str] = mapped_column(Text)
     filename: Mapped[str] = mapped_column(String(512))
     sha256: Mapped[str] = mapped_column(String(64), index=True)
@@ -147,6 +152,46 @@ class EvidenceRow(Base):
     meeting_time: Mapped[date | None] = mapped_column(Date)
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+
+class MeetingObservationRow(Base):
+    __tablename__ = "meeting_observations"
+
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    dataset_version_id: Mapped[str] = mapped_column(ForeignKey("dataset_versions.id"), index=True)
+    meeting_id: Mapped[str] = mapped_column(String(80), index=True)
+    artifact_version_id: Mapped[str] = mapped_column(String(100), index=True)
+    source_role: Mapped[str] = mapped_column(String(40), index=True)
+    authority: Mapped[str] = mapped_column(String(40), index=True)
+    observation_type: Mapped[str] = mapped_column(String(40), index=True)
+    observation_key: Mapped[str] = mapped_column(String(64), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    agenda_item: Mapped[str] = mapped_column(String(80), default="", index=True)
+    tdoc_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    specification_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    work_item_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    conclusion: Mapped[str | None] = mapped_column(String(40), index=True)
+    evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    effective_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_version_id",
+            "artifact_version_id",
+            "observation_type",
+            "observation_key",
+            "content_hash",
+            name="uq_meeting_observation_source_content",
+        ),
+        Index(
+            "ix_meeting_observations_briefing",
+            "dataset_version_id",
+            "meeting_id",
+            "observation_type",
+        ),
     )
 
 

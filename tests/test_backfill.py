@@ -24,7 +24,7 @@ from threegpp_kg.backfill import (
     run_backfill,
 )
 from threegpp_kg.config import load_settings, load_working_groups
-from threegpp_kg.constants import ArtifactKind
+from threegpp_kg.constants import ArtifactKind, SourceRole
 from threegpp_kg.ingestion.download import DownloadedArtifact
 from threegpp_kg.sources.adapter import DiscoveredArtifact, DiscoveredMeeting, SourceAdapter
 from threegpp_kg.storage.database import ArtifactVersionRow, Base, MeetingRow
@@ -226,6 +226,50 @@ def downloaded(url: str, content: bytes, content_type: str) -> DownloadedArtifac
         content_type=content_type,
         etag='"fixture"',
         last_modified="Sat, 29 Aug 2026 00:00:00 GMT",
+    )
+
+
+@pytest.mark.asyncio
+async def test_nested_inbox_sources_are_discovered_case_insensitively() -> None:
+    group = load_working_groups()["RAN2"]
+    meeting = DiscoveredMeeting(
+        id="RAN2-132",
+        working_group_id="RAN2",
+        number=132,
+        variant="",
+        url="https://www.3gpp.org/meeting/",
+        source_name="TSGR2_132",
+    )
+    pages = {
+        meeting.url: '<a href="INBOX/">INBOX/</a>',
+        f"{meeting.url}INBOX/": (
+            '<a href="Chair_Notes/">Chair_Notes/</a>'
+            '<a href="Email_Discussions/">Email_Discussions/</a>'
+        ),
+        f"{meeting.url}INBOX/Chair_Notes/": (
+            '<a href="R2_132_ChairNotes_final.docx">R2_132_ChairNotes_final.docx</a>'
+        ),
+        f"{meeting.url}INBOX/Email_Discussions/": (
+            '<a href="RAN2_132_Post_email_discussions_v00.docx">'
+            "RAN2_132_Post_email_discussions_v00.docx</a>"
+        ),
+    }
+
+    class Downloader:
+        async def download(self, url: str, **_kwargs: object) -> DownloadedArtifact:
+            return downloaded(url, pages[url].encode(), "text/html")
+
+    discovered = await backfill._discover_meeting_artifacts(
+        group,
+        SourceAdapter(group, {"www.3gpp.org"}),
+        Downloader(),  # type: ignore[arg-type]
+        meeting,
+    )
+    assert discovered["chair_notes"][0].kind == ArtifactKind.CHAIR_NOTES
+    assert discovered["chair_notes"][0].source_role == SourceRole.CHAIR_NOTES
+    assert (
+        discovered["post_meeting_discussion"][0].kind
+        == ArtifactKind.POST_MEETING_DISCUSSION
     )
 
 

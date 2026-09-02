@@ -213,30 +213,84 @@ def create_mcp_server(service: KnowledgeService) -> FastMCP:
         top_k: int = 100,
     ) -> dict[str, Any]:
         """List decisions for one meeting without conflating conclusion statuses."""
-        wanted = statuses or [
+        wanted = {
+            Conclusion(value)
+            for value in statuses
+            or [
             "agreed",
             "approved",
             "rejected",
             "not_pursued",
             "postponed",
             "revised",
-        ]
+            ]
+        }
+        briefing = await service.meeting_briefing(meeting_id)
+        result = briefing.model_dump(mode="json")
+        result["data"] = [
+            item.model_dump(mode="json")
+            for item in (briefing.data.decisions if briefing.data else [])
+            if item.conclusion in wanted
+        ][:top_k]
+        return result
+
+    @mcp.tool()
+    async def get_meeting_brief(meeting_id: str) -> dict[str, Any]:
+        """Build an evidence-linked briefing from chair notes, reports, and discussions."""
+        return (await service.meeting_briefing(meeting_id)).model_dump(mode="json")
+
+    @mcp.tool()
+    async def list_meeting_sources(meeting_id: str) -> dict[str, Any]:
+        """List immutable report, chair-note, and post-meeting source versions."""
+        return (await service.meeting_sources(meeting_id)).model_dump(mode="json")
+
+    @mcp.tool()
+    async def get_meeting_source(
+        meeting_id: str,
+        document_id: str,
+        block_limit: int = 500,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one meeting source version with blocks and extracted observations."""
+        if block_limit < 1 or block_limit > 2000:
+            raise ValueError("block_limit must be between 1 and 2000")
         return (
-            await service.search_tdocs(
-                SearchRequest(
-                    filters=SearchFilters(
-                        statuses=[Conclusion(value) for value in wanted],
-                        temporal=TemporalScope(meeting_ids=[meeting_id]),
-                    ),
-                    top_k=top_k,
-                )
+            await service.meeting_source_content(
+                meeting_id,
+                document_id,
+                block_limit=block_limit,
+                cursor=cursor,
             )
         ).model_dump(mode="json")
 
     @mcp.tool()
-    async def get_meeting_brief(meeting_id: str) -> dict[str, Any]:
-        """Build a deterministic, evidence-linked meeting briefing packet."""
-        return (await service.newsletter_packet(meeting_id)).model_dump(mode="json")
+    async def get_meeting_briefing(
+        meeting_id: str, edition: str = "provisional"
+    ) -> dict[str, Any]:
+        """Get deduplicated decisions, issues, actions, timeline, diffs, and evidence."""
+        return (await service.meeting_briefing(meeting_id, edition)).model_dump(mode="json")
+
+    @mcp.tool()
+    async def get_meeting_changes(meeting_id: str) -> dict[str, Any]:
+        """Get observation-level changes between the latest two source versions."""
+        briefing = await service.meeting_briefing(meeting_id)
+        result = briefing.model_dump(mode="json")
+        result["data"] = [
+            item.model_dump(mode="json")
+            for item in (briefing.data.changes if briefing.data else [])
+        ]
+        return result
+
+    @mcp.tool()
+    async def get_meeting_timeline(meeting_id: str) -> dict[str, Any]:
+        """Get the evidence-backed meeting observation timeline."""
+        briefing = await service.meeting_briefing(meeting_id)
+        result = briefing.model_dump(mode="json")
+        result["data"] = [
+            item.model_dump(mode="json")
+            for item in (briefing.data.timeline if briefing.data else [])
+        ]
+        return result
 
     @mcp.tool()
     async def get_newsletter(meeting_id: str, edition: str = "provisional") -> dict[str, Any]:

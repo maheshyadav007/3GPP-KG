@@ -60,6 +60,22 @@ for wg in RAN2 RAN3 SA2 CT1; do
 done
 ```
 
+Chair notes, meeting reports, and post-meeting email discussions are discovered and ingested by
+the normal backfill. To enrich meetings already present in a non-active candidate without
+reprocessing TDoc bodies, run:
+
+```bash
+uv run threegpp-kg enrich-meeting-sources \
+  --working-group RAN2 \
+  --meeting 132 \
+  --dataset-version local-latest-five \
+  --output artifacts/ran2-132-source-enrichment.json
+```
+
+The enrichment is content-hash idempotent. An unchanged legacy report is reparsed once from the
+local object store to create source metadata and observations; later runs skip it. Active datasets
+remain immutable, so enrich the candidate before activation.
+
 Activation validates completeness before making the candidate dataset current. If a newly
 finished meeting has not published its report yet, run the API against the immutable candidate as
 a preview until the missing source appears:

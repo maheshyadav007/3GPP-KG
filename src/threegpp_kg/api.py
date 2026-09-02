@@ -218,6 +218,44 @@ def create_app(
             max_edges=settings.graph.max_meeting_edges,
         )
 
+    @app.get("/api/meetings/{meeting_id}/sources")
+    async def meeting_sources(meeting_id: str) -> JSONResponse:
+        result = await knowledge.meeting_sources(meeting_id)
+        if result.completeness == "unavailable" and result.warnings and not result.data:
+            meeting = await knowledge.repository.meeting(meeting_id)
+            if meeting is None:
+                raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.get("/api/meetings/{meeting_id}/source-content")
+    async def meeting_source_content(
+        meeting_id: str,
+        document_id: str,
+        block_limit: int = Query(default=500, ge=1, le=2000),
+        cursor: str | None = None,
+    ) -> JSONResponse:
+        result = await knowledge.meeting_source_content(
+            meeting_id,
+            document_id,
+            block_limit=block_limit,
+            cursor=cursor,
+        )
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=result.warnings[0])
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.get("/api/meetings/{meeting_id}/briefing")
+    async def meeting_briefing(
+        meeting_id: str, edition: str = "provisional"
+    ) -> JSONResponse:
+        try:
+            result = await knowledge.meeting_briefing(meeting_id, edition)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
+        return JSONResponse(result.model_dump(mode="json"))
+
     @app.get("/api/meetings/{meeting_id}/facets/{facet}")
     async def meeting_facets(
         meeting_id: str,

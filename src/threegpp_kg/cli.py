@@ -50,6 +50,15 @@ def main() -> None:
     backfill.add_argument("--no-report", action="store_true")
     backfill.add_argument("--activate", action="store_true")
     backfill.add_argument("--output", type=Path)
+    enrich_sources = subparsers.add_parser(
+        "enrich-meeting-sources",
+        help="ingest only reports, chair notes, and post-meeting discussions",
+    )
+    enrich_sources.add_argument("--working-group", required=True)
+    enrich_sources.add_argument("--meeting", action="append", required=True)
+    enrich_sources.add_argument("--dataset-version", required=True)
+    enrich_sources.add_argument("--no-report", action="store_true")
+    enrich_sources.add_argument("--output", type=Path)
     download_corpus = subparsers.add_parser(
         "download-corpus",
         help="download meeting artifacts to local immutable storage without parsing or a database",
@@ -153,6 +162,36 @@ def main() -> None:
                     document_limit=args.document_limit,
                     include_report=not args.no_report,
                     activate=args.activate,
+                ),
+            )
+        )
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(
+                json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "enrich-meeting-sources":
+        settings = load_settings()
+        groups = load_working_groups()
+        working_group = args.working_group.upper()
+        if working_group not in groups:
+            raise SystemExit(f"unknown working group {working_group}")
+        meeting_ids = [
+            value.upper() if "-" in value else f"{working_group}-{value}"
+            for value in args.meeting
+        ]
+        result = asyncio.run(
+            run_backfill(
+                settings,
+                groups[working_group],
+                BackfillRequest(
+                    working_group=working_group,
+                    meeting_ids=meeting_ids,
+                    dataset_version=args.dataset_version,
+                    document_limit=0,
+                    include_report=not args.no_report,
+                    source_only=True,
                 ),
             )
         )

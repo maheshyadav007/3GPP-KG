@@ -16,6 +16,9 @@ from typing import Any
 from xml.etree import ElementTree
 
 from docx import Document
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 from openpyxl import load_workbook
 from pypdf import PdfReader
 
@@ -363,23 +366,32 @@ def parse_docx(content: bytes, document_id: str) -> list[DocumentBlock]:
     document = Document(io.BytesIO(content))
     blocks: list[DocumentBlock] = []
     section_path: list[str] = []
-    for paragraph in document.paragraphs:
-        text = paragraph.text.strip()
-        if not text:
+    for item in _iter_docx_blocks(document):
+        if isinstance(item, Paragraph):
+            text = item.text.strip()
+            if not text:
+                continue
+            style = (item.style.name or "").lower() if item.style else ""
+            kind = _paragraph_kind(text, style)
+            if kind == BlockKind.HEADING:
+                level = _heading_level(style)
+                section_path = section_path[: max(0, level - 1)] + [text]
+            blocks.append(_block(document_id, len(blocks), kind, text, section_path))
             continue
-        style = (paragraph.style.name or "").lower() if paragraph.style else ""
-        kind = _paragraph_kind(text, style)
-        if kind == BlockKind.HEADING:
-            level = _heading_level(style)
-            section_path = section_path[: max(0, level - 1)] + [text]
-        blocks.append(_block(document_id, len(blocks), kind, text, section_path))
-    for table in document.tables:
-        for row_number, row in enumerate(table.rows):
+        for row_number, row in enumerate(item.rows):
             text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
             if text:
                 block = _block(document_id, len(blocks), BlockKind.TABLE_ROW, text, section_path)
                 blocks.append(block.model_copy(update={"table_row": row_number}))
     return blocks
+
+
+def _iter_docx_blocks(document: Any) -> Iterable[Paragraph | Table]:
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, document)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, document)
 
 
 def parse_pdf(content: bytes, document_id: str) -> list[DocumentBlock]:

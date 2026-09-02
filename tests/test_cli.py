@@ -85,6 +85,40 @@ def test_embedding_benchmark_cli_passes_sample_size(monkeypatch, capsys) -> None
     }
 
 
+def test_source_enrichment_cli_never_requests_tdoc_bodies(monkeypatch, capsys) -> None:
+    async def fake_backfill(settings, group, request):
+        del settings, group
+        return {
+            "dataset_version": request.dataset_version,
+            "meeting_ids": request.meeting_ids,
+            "document_limit": request.document_limit,
+            "source_only": request.source_only,
+        }
+
+    monkeypatch.setattr(cli, "run_backfill", fake_backfill)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "threegpp-kg",
+            "enrich-meeting-sources",
+            "--working-group",
+            "RAN2",
+            "--meeting",
+            "132",
+            "--dataset-version",
+            "candidate-v1",
+        ],
+    )
+    cli.main()
+    assert json.loads(capsys.readouterr().out) == {
+        "dataset_version": "candidate-v1",
+        "document_limit": 0,
+        "meeting_ids": ["RAN2-132"],
+        "source_only": True,
+    }
+
+
 def test_newsletter_build_and_review_cli(monkeypatch, tmp_path) -> None:
     async def fake_build(meeting, edition, *, render, last_k_meetings):
         return {

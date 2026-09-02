@@ -5,7 +5,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from .constants import BlockKind, Conclusion, EvidenceAuthority, MatchMode, NewsletterStatus
+from .constants import (
+    BlockKind,
+    Conclusion,
+    DocumentState,
+    EvidenceAuthority,
+    MatchMode,
+    NewsletterStatus,
+    ObservationType,
+    SourceRole,
+)
 
 
 class TemporalScope(BaseModel):
@@ -158,6 +167,61 @@ class EmbeddingProfileInfo(BaseModel):
 class RetrievalMetadata(BaseModel):
     mode: Literal["hybrid", "lexical", "lexical_fallback"]
     embedding_profile: EmbeddingProfileInfo | None = None
+
+
+class MeetingSource(BaseModel):
+    artifact_version_id: str
+    meeting_id: str
+    source_role: SourceRole
+    logical_document_id: str
+    document_id: str | None = None
+    filename: str
+    source_url: str
+    sha256: str
+    document_state: DocumentState = DocumentState.PUBLISHED
+    authority: EvidenceAuthority
+    published_at: datetime | None = None
+    observed_at: datetime
+
+
+class MeetingObservation(BaseModel):
+    id: str
+    meeting_id: str
+    artifact_version_id: str
+    source_role: SourceRole
+    authority: EvidenceAuthority
+    observation_type: ObservationType
+    observation_key: str
+    text: str
+    agenda_item: str = ""
+    tdoc_ids: list[str] = Field(default_factory=list)
+    specification_ids: list[str] = Field(default_factory=list)
+    work_item_ids: list[str] = Field(default_factory=list)
+    conclusion: Conclusion | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    content_hash: str
+    effective_at: datetime | None = None
+    confidence: float = Field(1.0, ge=0, le=1)
+
+
+class MeetingObservationChange(BaseModel):
+    change_type: Literal["added", "removed", "changed"]
+    logical_document_id: str
+    before: MeetingObservation | None = None
+    after: MeetingObservation | None = None
+
+
+class MeetingBriefing(BaseModel):
+    meeting: Meeting
+    edition: Literal["provisional", "final"]
+    sources: list[MeetingSource] = Field(default_factory=list)
+    observations: list[MeetingObservation] = Field(default_factory=list)
+    decisions: list[MeetingObservation] = Field(default_factory=list)
+    open_issues: list[MeetingObservation] = Field(default_factory=list)
+    follow_up_actions: list[MeetingObservation] = Field(default_factory=list)
+    timeline: list[MeetingObservation] = Field(default_factory=list)
+    changes: list[MeetingObservationChange] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
 
 
 class SearchFilters(BaseModel):

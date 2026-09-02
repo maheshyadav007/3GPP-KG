@@ -90,6 +90,18 @@ async def test_search_meetings_newsletter_and_missing_document_routes(service) -
         assert meetings.json()["data"][0]["id"] == "RAN2-133"
         assert meetings.json()["data"][0]["tdoc_count"] == 3
 
+        sources = await client.get("/api/meetings/RAN2-133/sources")
+        assert sources.status_code == 200
+        assert sources.json()["data"] == []
+        briefing = await client.get("/api/meetings/RAN2-133/briefing")
+        assert briefing.status_code == 200
+        assert briefing.json()["data"]["meeting"]["id"] == "RAN2-133"
+        missing_source = await client.get(
+            "/api/meetings/RAN2-133/source-content",
+            params={"document_id": "missing"},
+        )
+        assert missing_source.status_code == 404
+
         newsletter = await client.get("/api/newsletters/RAN2-133", params={"edition": "final"})
         assert newsletter.status_code == 200
         assert newsletter.json()["data"]["edition"] == "final"

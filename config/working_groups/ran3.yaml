@@ -9,6 +9,8 @@ directories:
   documents: [Docs]
   reports: [Report]
   tdoc_lists: [TdocList, Docs]
+  chair_notes: [Inbox/Chair_Notes, Inbox/Chairs_Notes, INBOX/Chair_Notes, INBOX/Chairs_Notes]
+  post_meeting_discussion: [Inbox/Email_Discussions, INBOX/Email_Discussions]
 artifact_patterns:
   agenda_csv: '(?i)agenda\.csv$'
   tdoc_list: '(?i)(tdocList|TDoc_List).*\.(xlsx|zip)$'

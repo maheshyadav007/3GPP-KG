@@ -19,9 +19,12 @@ from .constants import (
     AUTHORITY_RANK,
     BlockKind,
     Conclusion,
+    DocumentState,
     EvidenceAuthority,
     MatchMode,
     NewsletterStatus,
+    ObservationType,
+    SourceRole,
 )
 from .domain import (
     DocumentBlock,
@@ -29,6 +32,8 @@ from .domain import (
     EmbeddingProfileInfo,
     EvidenceRef,
     Meeting,
+    MeetingObservation,
+    MeetingSource,
     NewsletterRecord,
     Passage,
     RetrievalChunk,
@@ -38,12 +43,14 @@ from .domain import (
 )
 from .retrieval import rank_chunks, reciprocal_rank_fusion
 from .storage.database import (
+    ArtifactVersionRow,
     ChunkEmbeddingRow,
     DatasetEmbeddingProfileRow,
     DatasetVersionRow,
     DocumentBlockRow,
     EmbeddingProfileRow,
     EvidenceRow,
+    MeetingObservationRow,
     MeetingRow,
     NewsletterRow,
     RetrievalChunkRow,
@@ -69,6 +76,10 @@ class Repository(Protocol):
     async def meeting_tdocs(self, meeting_id: str) -> list[TDoc]: ...
 
     async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]: ...
+
+    async def meeting_sources(self, meeting_id: str) -> list[MeetingSource]: ...
+
+    async def meeting_observations(self, meeting_id: str) -> list[MeetingObservation]: ...
 
     async def latest_newsletter(
         self,
@@ -423,6 +434,47 @@ class SqlRepository:
             ).all()
         return {meeting_id: int(count) for meeting_id, count in rows}
 
+    async def meeting_sources(self, meeting_id: str) -> list[MeetingSource]:
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(ArtifactVersionRow)
+                        .where(
+                            ArtifactVersionRow.dataset_version_id == version,
+                            func.lower(ArtifactVersionRow.meeting_id) == meeting_id.lower(),
+                            ArtifactVersionRow.logical_document_id.is_not(None),
+                        )
+                        .order_by(
+                            ArtifactVersionRow.logical_document_id,
+                            ArtifactVersionRow.observed_at,
+                        )
+                    )
+                ).all()
+            )
+        return [self._meeting_source(row) for row in rows]
+
+    async def meeting_observations(self, meeting_id: str) -> list[MeetingObservation]:
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            rows = list(
+                (
+                    await session.scalars(
+                        select(MeetingObservationRow)
+                        .where(
+                            MeetingObservationRow.dataset_version_id == version,
+                            func.lower(MeetingObservationRow.meeting_id) == meeting_id.lower(),
+                        )
+                        .order_by(
+                            MeetingObservationRow.effective_at,
+                            MeetingObservationRow.id,
+                        )
+                    )
+                ).all()
+            )
+        return [self._meeting_observation(row) for row in rows]
+
     async def latest_newsletter(
         self,
         meeting_id: str,
@@ -655,7 +707,19 @@ class SqlRepository:
                         )
                     ).all()
                 )
+                meeting_sources = list(
+                    (
+                        await session.scalars(
+                            select(ArtifactVersionRow.document_id).where(
+                                ArtifactVersionRow.dataset_version_id == version,
+                                ArtifactVersionRow.meeting_id.in_(meeting_ids),
+                                ArtifactVersionRow.document_id.is_not(None),
+                            )
+                        )
+                    ).all()
+                )
             document_ids.extend(meeting_tdocs)
+            document_ids.extend(meeting_sources)
         if document_ids:
             filters.append(RetrievalChunkRow.document_id.in_(set(document_ids)))
         async with self.sessions() as session:
@@ -816,6 +880,57 @@ class SqlRepository:
         )
 
     @staticmethod
+    def _meeting_source(row: ArtifactVersionRow) -> MeetingSource:
+        role = SourceRole(row.source_role)
+        state = DocumentState(row.document_state)
+        if role == SourceRole.CHAIR_NOTES:
+            authority = EvidenceAuthority.CHAIR_NOTES
+        elif role == SourceRole.POST_MEETING_DISCUSSION:
+            authority = EvidenceAuthority.POST_MEETING_DISCUSSION
+        elif state == DocumentState.APPROVED:
+            authority = EvidenceAuthority.APPROVED_REPORT
+        elif state == DocumentState.WORKING:
+            authority = EvidenceAuthority.DRAFT_REPORT
+        else:
+            authority = EvidenceAuthority.FINAL_REPORT
+        return MeetingSource(
+            artifact_version_id=row.id,
+            meeting_id=row.meeting_id,
+            source_role=role,
+            logical_document_id=row.logical_document_id or row.document_id or row.id,
+            document_id=row.document_id,
+            filename=row.filename,
+            source_url=row.source_url,
+            sha256=row.sha256,
+            document_state=state,
+            authority=authority,
+            published_at=row.published_at,
+            observed_at=row.observed_at,
+        )
+
+    @staticmethod
+    def _meeting_observation(row: MeetingObservationRow) -> MeetingObservation:
+        return MeetingObservation(
+            id=row.id,
+            meeting_id=row.meeting_id,
+            artifact_version_id=row.artifact_version_id,
+            source_role=SourceRole(row.source_role),
+            authority=EvidenceAuthority(row.authority),
+            observation_type=ObservationType(row.observation_type),
+            observation_key=row.observation_key,
+            text=row.text,
+            agenda_item=row.agenda_item,
+            tdoc_ids=row.tdoc_ids or [],
+            specification_ids=row.specification_ids or [],
+            work_item_ids=row.work_item_ids or [],
+            conclusion=Conclusion(row.conclusion) if row.conclusion else None,
+            evidence_ids=row.evidence_ids or [],
+            content_hash=row.content_hash,
+            effective_at=row.effective_at,
+            confidence=row.confidence,
+        )
+
+    @staticmethod
     def _tdoc(row: TDocRow) -> TDoc:
         return TDoc(
             id=row.id,
@@ -876,6 +991,8 @@ class InMemoryRepository:
         chunks: list[RetrievalChunk] | None = None,
         blocks: list[DocumentBlock] | None = None,
         dataset_version: str = "dev-fixture-v1",
+        sources: list[MeetingSource] | None = None,
+        observations: list[MeetingObservation] | None = None,
     ) -> None:
         self.meetings = meetings or []
         self.tdocs = tdocs or []
@@ -883,6 +1000,8 @@ class InMemoryRepository:
         self.chunks = chunks or []
         self.blocks = blocks or []
         self.dataset_version = dataset_version
+        self.sources = sources or []
+        self.observations = observations or []
         self.newsletters: dict[str, NewsletterRecord] = {}
 
     async def active_dataset_version(self) -> str:
@@ -996,6 +1115,29 @@ class InMemoryRepository:
     async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]:
         selected = set(meeting_ids)
         return dict(Counter(item.meeting_id for item in self.tdocs if item.meeting_id in selected))
+
+    async def meeting_sources(self, meeting_id: str) -> list[MeetingSource]:
+        return sorted(
+            (
+                item
+                for item in self.sources
+                if item.meeting_id.casefold() == meeting_id.casefold()
+            ),
+            key=lambda item: (item.logical_document_id, item.observed_at),
+        )
+
+    async def meeting_observations(self, meeting_id: str) -> list[MeetingObservation]:
+        return sorted(
+            (
+                item
+                for item in self.observations
+                if item.meeting_id.casefold() == meeting_id.casefold()
+            ),
+            key=lambda item: (
+                item.effective_at.isoformat() if item.effective_at else "",
+                item.id,
+            ),
+        )
 
     async def latest_newsletter(
         self,
@@ -1146,8 +1288,14 @@ class InMemoryRepository:
         del embedding_profile_id
         allowed_tdocs = set(tdoc_ids)
         if meeting_ids:
+            selected_meetings = set(meeting_ids)
             allowed_tdocs.update(
-                item.id for item in self.tdocs if item.meeting_id in set(meeting_ids)
+                item.id for item in self.tdocs if item.meeting_id in selected_meetings
+            )
+            allowed_tdocs.update(
+                item.document_id
+                for item in self.sources
+                if item.meeting_id in selected_meetings and item.document_id
             )
         chunks = [
             chunk

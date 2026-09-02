@@ -7,7 +7,7 @@ from urllib.parse import unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from ..config import WorkingGroupConfig
-from ..constants import ArtifactKind
+from ..constants import ArtifactKind, SourceRole
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +26,20 @@ class DiscoveredArtifact:
     url: str
     filename: str
     meeting_id: str
+    source_role: SourceRole = SourceRole.OTHER
+
+    def __post_init__(self) -> None:
+        if self.source_role != SourceRole.OTHER:
+            return
+        inferred = {
+            ArtifactKind.AGENDA: SourceRole.AGENDA,
+            ArtifactKind.TDOC_LIST: SourceRole.TDOC_LIST,
+            ArtifactKind.TDOC: SourceRole.TDOC,
+            ArtifactKind.REPORT: SourceRole.REPORT,
+            ArtifactKind.CHAIR_NOTES: SourceRole.CHAIR_NOTES,
+            ArtifactKind.POST_MEETING_DISCUSSION: SourceRole.POST_MEETING_DISCUSSION,
+        }.get(self.kind, SourceRole.OTHER)
+        object.__setattr__(self, "source_role", inferred)
 
 
 class SourceAdapter:
@@ -71,7 +85,13 @@ class SourceAdapter:
             if filename in {"", ".", ".."} or name.endswith("/"):
                 continue
             kind = self._classify(filename, directory_role)
-            artifacts[url] = DiscoveredArtifact(kind, url, filename, meeting_id)
+            artifacts[url] = DiscoveredArtifact(
+                kind,
+                url,
+                filename,
+                meeting_id,
+                _source_role(directory_role),
+            )
         return sorted(artifacts.values(), key=lambda item: item.filename.lower())
 
     def _classify(self, filename: str, directory_role: str) -> ArtifactKind:
@@ -89,6 +109,10 @@ class SourceAdapter:
                 return kind
         if directory_role == "reports":
             return ArtifactKind.REPORT
+        if directory_role == SourceRole.CHAIR_NOTES:
+            return ArtifactKind.CHAIR_NOTES
+        if directory_role == SourceRole.POST_MEETING_DISCUSSION:
+            return ArtifactKind.POST_MEETING_DISCUSSION
         return ArtifactKind.OTHER
 
     def _links(self, html: str, base_url: str) -> list[tuple[str, str]]:
@@ -114,3 +138,14 @@ def _normalize_variant(value: str) -> str:
     if normalized in {"ahe", "ah-e"}:
         return "ah-e"
     return normalized
+
+
+def _source_role(directory_role: str) -> SourceRole:
+    return {
+        "agenda": SourceRole.AGENDA,
+        "documents": SourceRole.TDOC,
+        "reports": SourceRole.REPORT,
+        "tdoc_lists": SourceRole.TDOC_LIST,
+        "chair_notes": SourceRole.CHAIR_NOTES,
+        "post_meeting_discussion": SourceRole.POST_MEETING_DISCUSSION,
+    }.get(directory_role, SourceRole.OTHER)

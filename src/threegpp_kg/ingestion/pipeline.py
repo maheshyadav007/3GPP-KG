@@ -13,7 +13,14 @@ from ..config import (
     ParserConfig,
     load_organization_aliases,
 )
-from ..constants import ArtifactKind, DatasetState, EdgeType, EvidenceAuthority
+from ..constants import (
+    ArtifactKind,
+    DatasetState,
+    DocumentState,
+    EdgeType,
+    EvidenceAuthority,
+    SourceRole,
+)
 from ..domain import DocumentBlock, Meeting, RetrievalChunk, TDoc
 from ..graph import GraphFact, validate_graph
 from ..parsers.documents import parse_document
@@ -150,6 +157,11 @@ async def persist_raw_artifact(
     parse_status: str = "not_applicable",
     parse_error: str | None = None,
     ensure_parents: bool = True,
+    source_role: SourceRole = SourceRole.OTHER,
+    logical_document_id: str | None = None,
+    document_id: str | None = None,
+    document_state: DocumentState = DocumentState.PUBLISHED,
+    published_at: datetime | None = None,
 ) -> ArtifactVersionRow:
     """Persist an immutable source artifact that does not require content parsing."""
     if ensure_parents:
@@ -163,12 +175,22 @@ async def persist_raw_artifact(
     if existing:
         existing.parse_status = parse_status
         existing.parse_error = parse_error
+        existing.source_role = source_role
+        existing.logical_document_id = logical_document_id
+        existing.document_id = document_id
+        existing.document_state = document_state
+        existing.published_at = published_at
         return existing
     row = ArtifactVersionRow(
         id=artifact_id,
         dataset_version_id=dataset_version_id,
         meeting_id=meeting.id,
         kind=kind,
+        source_role=source_role,
+        logical_document_id=logical_document_id,
+        document_id=document_id,
+        document_state=document_state,
+        published_at=published_at,
         source_url=artifact.url,
         filename=filename,
         sha256=artifact.sha256,
@@ -208,6 +230,8 @@ async def ingest_tdoc_workbook(
                 dataset_version_id=dataset_version_id,
                 meeting_id=meeting.id,
                 kind=ArtifactKind.TDOC_LIST,
+                source_role=SourceRole.TDOC_LIST,
+                logical_document_id=f"tdoc-list:{meeting.id}",
                 source_url=artifact.url,
                 filename=filename,
                 sha256=artifact.sha256,
@@ -326,6 +350,10 @@ async def ingest_document_artifact(
     authority: EvidenceAuthority = EvidenceAuthority.TDOC_BODY,
     ensure_parents: bool = True,
     assume_new: bool = False,
+    source_role: SourceRole = SourceRole.TDOC,
+    logical_document_id: str | None = None,
+    document_state: DocumentState = DocumentState.PUBLISHED,
+    published_at: datetime | None = None,
 ) -> tuple[list[DocumentBlock], list[RetrievalChunk]]:
     if ensure_parents:
         await create_dataset(session, dataset_version_id)
@@ -342,6 +370,11 @@ async def ingest_document_artifact(
                 dataset_version_id=dataset_version_id,
                 meeting_id=meeting.id,
                 kind=kind,
+                source_role=source_role,
+                logical_document_id=logical_document_id or document_id,
+                document_id=document_id,
+                document_state=document_state,
+                published_at=published_at,
                 source_url=artifact.url,
                 filename=filename,
                 sha256=artifact.sha256,
@@ -356,6 +389,11 @@ async def ingest_document_artifact(
     else:
         artifact_row.parse_status = "parsed"
         artifact_row.parse_error = None
+        artifact_row.source_role = source_role
+        artifact_row.logical_document_id = logical_document_id or document_id
+        artifact_row.document_id = document_id
+        artifact_row.document_state = document_state
+        artifact_row.published_at = published_at
     source_blocks = await asyncio.to_thread(
         parse_document, artifact.content, filename, document_id, parser_config
     )
@@ -530,6 +568,10 @@ def _artifact_id(dataset_version_id: str, artifact: DownloadedArtifact) -> str:
         f"{dataset_version_id}|{artifact.url}|{artifact.sha256}".encode()
     ).hexdigest()
     return "artifact-" + digest[:32]
+
+
+def artifact_version_id(dataset_version_id: str, artifact: DownloadedArtifact) -> str:
+    return _artifact_id(dataset_version_id, artifact)
 
 
 def _evidence_excerpt(tdoc: TDoc) -> str:

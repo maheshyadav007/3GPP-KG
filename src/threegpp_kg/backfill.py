@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -15,7 +15,7 @@ from pypdf import PdfReader
 from sqlalchemy import func, select
 
 from .config import Settings, WorkingGroupConfig
-from .constants import ArtifactKind, Conclusion, DatasetState, EvidenceAuthority
+from .constants import ArtifactKind, Conclusion, DatasetState, SourceRole
 from .domain import Meeting
 from .ingestion.download import DownloadedArtifact, SafeDownloader
 from .ingestion.pipeline import (
@@ -25,12 +25,19 @@ from .ingestion.pipeline import (
     update_meeting_dates,
     validate_dataset,
 )
+from .meeting_sources import (
+    ingest_meeting_source,
+    source_artifact_kind,
+    source_document_state,
+    source_logical_document_id,
+)
 from .parsers.documents import UnsafeDocumentError
 from .publisher import activate_dataset
 from .sources.adapter import DiscoveredArtifact, DiscoveredMeeting, SourceAdapter
 from .storage.database import (
     ArtifactVersionRow,
     DatasetVersionRow,
+    MeetingRow,
     TDocRow,
     create_engine_and_session,
 )
@@ -46,6 +53,7 @@ class BackfillRequest:
     document_limit: int = 0
     include_report: bool = True
     activate: bool = False
+    source_only: bool = False
 
 
 class BackfillError(RuntimeError):
@@ -191,6 +199,50 @@ async def _ingest_meeting(
     request: BackfillRequest,
 ) -> dict[str, Any]:
     artifacts = await _discover_meeting_artifacts(group, adapter, downloader, source_meeting)
+    report = _select_report(artifacts.get("reports", [])) if request.include_report else None
+    if request.source_only:
+        async with sessions() as session:
+            row = await session.scalar(
+                select(MeetingRow).where(
+                    MeetingRow.dataset_version_id == request.dataset_version,
+                    MeetingRow.id == source_meeting.id,
+                )
+            )
+        if row is None:
+            raise BackfillError(
+                f"meeting {source_meeting.id} is not present in dataset {request.dataset_version}"
+            )
+        meeting = Meeting(
+            id=row.id,
+            working_group_id=row.working_group_id,
+            number=row.number,
+            variant=row.variant,
+            name=row.name,
+            source_url=row.source_url,
+            starts_on=row.starts_on,
+            ends_on=row.ends_on,
+            readiness=row.readiness,
+        )
+        source_results, selected_report = await _ingest_high_value_sources(
+            settings,
+            downloader,
+            sessions,
+            object_store,
+            request.dataset_version,
+            meeting,
+            artifacts,
+            report,
+            request.include_report,
+        )
+        return {
+            "meeting_id": meeting.id,
+            "source_url": meeting.source_url,
+            "starts_on": meeting.starts_on.isoformat() if meeting.starts_on else None,
+            "ends_on": meeting.ends_on.isoformat() if meeting.ends_on else None,
+            "report": selected_report,
+            "meeting_sources": source_results,
+            "source_only": True,
+        }
     workbook_candidates = _deduplicate(
         artifact
         for role in ("tdoc_lists", "documents")
@@ -202,7 +254,6 @@ async def _ingest_meeting(
     workbook = max(workbook_candidates, key=_workbook_candidate_key)
 
     starts_on, ends_on = await _discover_meeting_dates(downloader, artifacts.get("invitations", []))
-    report = _select_report(artifacts.get("reports", [])) if request.include_report else None
     meeting = Meeting(
         id=source_meeting.id,
         working_group_id=group.id,
@@ -258,56 +309,17 @@ async def _ingest_meeting(
             )
             await session.commit()
 
-    report_status: dict[str, Any] | None = None
-    if report:
-        try:
-            report_download = await _required_download(downloader, report.url)
-            authority = (
-                EvidenceAuthority.DRAFT_REPORT
-                if "draft" in report.filename.lower() or "skeleton" in report.filename.lower()
-                else EvidenceAuthority.FINAL_REPORT
-            )
-            async with sessions() as session:
-                blocks, chunks = await ingest_document_artifact(
-                    session,
-                    object_store,
-                    request.dataset_version,
-                    meeting,
-                    f"report:{meeting.id}",
-                    report.filename,
-                    report_download,
-                    settings.chunking,
-                    evidence_blocks=settings.evidence_blocks,
-                    parser_config=settings.parsers,
-                    kind=ArtifactKind.REPORT,
-                    authority=authority,
-                )
-                date_source: str | None = None
-                if not meeting.starts_on or not meeting.ends_on:
-                    report_start, report_end = parse_meeting_date_range(
-                        " ".join(block.text for block in blocks[:50])
-                    )
-                    if report_start and report_end:
-                        await update_meeting_dates(
-                            session,
-                            request.dataset_version,
-                            meeting.id,
-                            report_start,
-                            report_end,
-                        )
-                        meeting.starts_on = report_start
-                        meeting.ends_on = report_end
-                        date_source = "report"
-                await session.commit()
-            report_status = {
-                "filename": report.filename,
-                "blocks": len(blocks),
-                "chunks": len(chunks),
-                "authority": authority.value,
-                "date_source": date_source,
-            }
-        except Exception as exc:  # noqa: BLE001 - recorded for resumable source processing
-            report_status = {"filename": report.filename, "error": str(exc)}
+    source_results, selected_report_result = await _ingest_high_value_sources(
+        settings,
+        downloader,
+        sessions,
+        object_store,
+        request.dataset_version,
+        meeting,
+        artifacts,
+        report,
+        request.include_report,
+    )
 
     document_artifacts = _deduplicate(
         artifact
@@ -422,9 +434,153 @@ async def _ingest_meeting(
         "actionable_archive_match_ratio": (
             len(actionable_ids & archive_ids) / len(actionable_ids) if actionable_ids else 1.0
         ),
-        "report": report_status,
+        "report": selected_report_result,
+        "meeting_sources": source_results,
         "document_results": document_results,
     }
+
+
+async def _ingest_high_value_sources(
+    settings: Settings,
+    downloader: SafeDownloader,
+    sessions: Any,
+    object_store: LocalObjectStore,
+    dataset_version: str,
+    meeting: Meeting,
+    artifacts: dict[str, list[DiscoveredArtifact]],
+    report: DiscoveredArtifact | None,
+    include_report: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    source_artifacts = _deduplicate(
+        artifact
+        for role in (
+            *(("reports",) if include_report else ()),
+            "chair_notes",
+            "post_meeting_discussion",
+        )
+        for artifact in artifacts.get(role, [])
+        if artifact.kind
+        in {
+            ArtifactKind.REPORT,
+            ArtifactKind.CHAIR_NOTES,
+            ArtifactKind.POST_MEETING_DISCUSSION,
+        }
+        and artifact.filename.casefold().endswith((".zip", ".doc", ".docx", ".pdf", ".txt"))
+    )
+    source_results: list[dict[str, Any]] = []
+    selected_report_result: dict[str, Any] | None = None
+    for source in sorted(source_artifacts, key=lambda item: _natural_key(item.filename)):
+        source_download: DownloadedArtifact | None = None
+        try:
+            source_download, previous_status = await _conditional_download(
+                downloader,
+                sessions,
+                dataset_version,
+                source.url,
+            )
+            if source_download is None:
+                persisted = await _persisted_source_download(
+                    sessions,
+                    object_store,
+                    dataset_version,
+                    source.url,
+                )
+                if persisted is None or persisted[0]:
+                    source_result = {
+                        "filename": source.filename,
+                        "source_role": source.source_role,
+                        "status": (
+                            "quarantined"
+                            if previous_status == "quarantined"
+                            else "unchanged"
+                        ),
+                    }
+                    source_results.append(source_result)
+                    if report and source.url == report.url:
+                        selected_report_result = source_result
+                    continue
+                source_download = persisted[1]
+            async with sessions() as session:
+                blocks, chunks, observations = await ingest_meeting_source(
+                    session,
+                    object_store,
+                    dataset_version,
+                    meeting,
+                    source.filename,
+                    source_download,
+                    source.source_role,
+                    settings.chunking,
+                    evidence_blocks=settings.evidence_blocks,
+                    parser_config=settings.parsers,
+                )
+                date_source: str | None = None
+                if (
+                    source.source_role == SourceRole.REPORT
+                    and report
+                    and source.url == report.url
+                    and (not meeting.starts_on or not meeting.ends_on)
+                ):
+                    report_start, report_end = parse_meeting_date_range(
+                        " ".join(block.text for block in blocks[:50])
+                    )
+                    if report_start and report_end:
+                        await update_meeting_dates(
+                            session,
+                            dataset_version,
+                            meeting.id,
+                            report_start,
+                            report_end,
+                        )
+                        meeting.starts_on = report_start
+                        meeting.ends_on = report_end
+                        date_source = "report"
+                await session.commit()
+            source_result = {
+                "filename": source.filename,
+                "source_role": source.source_role,
+                "status": "ingested",
+                "blocks": len(blocks),
+                "chunks": len(chunks),
+                "observations": len(observations),
+                "date_source": date_source,
+            }
+            source_results.append(source_result)
+            if report and source.url == report.url:
+                selected_report_result = source_result
+        except Exception as exc:  # noqa: BLE001 - recorded for resumable source processing
+            if source_download is not None:
+                async with sessions() as session:
+                    await persist_raw_artifact(
+                        session,
+                        object_store,
+                        dataset_version,
+                        meeting,
+                        source.filename,
+                        source_download,
+                        source_artifact_kind(source.source_role),
+                        parse_status=(
+                            "quarantined" if isinstance(exc, UnsafeDocumentError) else "failed"
+                        ),
+                        parse_error=str(exc),
+                        source_role=source.source_role,
+                        logical_document_id=source_logical_document_id(
+                            meeting.id, source.source_role, source.filename
+                        ),
+                        document_state=source_document_state(
+                            source.source_role, source.filename
+                        ),
+                    )
+                    await session.commit()
+            source_result = {
+                "filename": source.filename,
+                "source_role": source.source_role,
+                "status": "failed",
+                "error": str(exc),
+            }
+            source_results.append(source_result)
+            if report and source.url == report.url:
+                selected_report_result = source_result
+    return source_results, selected_report_result
 
 
 async def _discover_meeting_artifacts(
@@ -435,15 +591,19 @@ async def _discover_meeting_artifacts(
 ) -> dict[str, list[DiscoveredArtifact]]:
     root = await _required_download(downloader, meeting.url)
     root_html = _text(root)
-    available = _directory_names(root_html)
     listing_cache: dict[str, str] = {meeting.url: root_html}
     found: dict[str, list[DiscoveredArtifact]] = {}
     for role, candidates in group.directories.items():
         role_artifacts: list[DiscoveredArtifact] = []
         for candidate in candidates:
-            if candidate != "." and candidate.casefold() not in available:
+            listing_url = await _resolve_directory_url(
+                meeting.url,
+                candidate,
+                downloader,
+                listing_cache,
+            )
+            if listing_url is None:
                 continue
-            listing_url = meeting.url if candidate == "." else urljoin(meeting.url, candidate + "/")
             if listing_url not in listing_cache:
                 listing_cache[listing_url] = _text(
                     await _required_download(downloader, listing_url)
@@ -455,6 +615,43 @@ async def _discover_meeting_artifacts(
             )
         found[role] = _deduplicate(role_artifacts)
     return found
+
+
+async def _resolve_directory_url(
+    meeting_url: str,
+    candidate: str,
+    downloader: SafeDownloader,
+    listing_cache: dict[str, str],
+) -> str | None:
+    current_url = meeting_url
+    if candidate == ".":
+        return current_url
+    for part in (item for item in candidate.split("/") if item):
+        html = listing_cache.get(current_url)
+        if html is None:
+            html = _text(await _required_download(downloader, current_url))
+            listing_cache[current_url] = html
+        entries = _directory_entries(html, current_url)
+        next_url = entries.get(part.casefold())
+        if next_url is None:
+            return None
+        current_url = next_url
+    return current_url
+
+
+def _directory_entries(html: str, base_url: str) -> dict[str, str]:
+    soup = BeautifulSoup(html, "html.parser")
+    entries: dict[str, str] = {}
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor["href"]).strip()
+        if not href or href.startswith(("?", "#", "javascript:")):
+            continue
+        url = urljoin(base_url, href)
+        parsed = urlparse(url)
+        name = unquote(parsed.path.rstrip("/").rsplit("/", 1)[-1])
+        if name and name not in {".", ".."}:
+            entries[name.casefold()] = url.rstrip("/") + "/"
+    return entries
 
 
 async def _discover_meeting_dates(
@@ -595,6 +792,38 @@ async def _conditional_download(
         ),
     )
     return downloaded, previous.parse_status if previous else None
+
+
+async def _persisted_source_download(
+    sessions: Any,
+    object_store: LocalObjectStore,
+    dataset_version: str,
+    url: str,
+) -> tuple[bool, DownloadedArtifact] | None:
+    async with sessions() as session:
+        row = await session.scalar(
+            select(ArtifactVersionRow)
+            .where(
+                ArtifactVersionRow.dataset_version_id == dataset_version,
+                ArtifactVersionRow.source_url == url,
+            )
+            .order_by(ArtifactVersionRow.observed_at.desc())
+            .limit(1)
+        )
+    if row is None or row.parse_status in {"failed", "quarantined"}:
+        return None
+    content = await object_store.get(row.object_key)
+    return (
+        bool(row.logical_document_id and row.document_id and row.source_role != SourceRole.OTHER),
+        DownloadedArtifact(
+            url=row.source_url,
+            content=content,
+            sha256=row.sha256,
+            content_type=row.content_type,
+            etag=row.etag,
+            last_modified=row.last_modified,
+        ),
+    )
 
 
 async def _process_document_outcome(

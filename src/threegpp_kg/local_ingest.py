@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from .backfill import _workbook_candidate_key, parse_meeting_date_range
 from .config import Settings, load_working_groups
-from .constants import ArtifactKind, DatasetState, EvidenceAuthority
+from .constants import ArtifactKind, DatasetState, SourceRole
 from .domain import Meeting
 from .ingestion.download import DownloadedArtifact
 from .ingestion.pipeline import (
@@ -24,6 +24,12 @@ from .ingestion.pipeline import (
     persist_raw_artifact,
     update_meeting_dates,
     validate_dataset,
+)
+from .meeting_sources import (
+    ingest_meeting_source,
+    source_artifact_kind,
+    source_document_state,
+    source_logical_document_id,
 )
 from .parsers.documents import UnsafeDocumentError, UnsupportedDocumentError
 from .sources.adapter import DiscoveredArtifact
@@ -184,17 +190,36 @@ async def _ingest_local_meeting(
             )
             await session.commit()
 
+    source_entries = [
+        entry
+        for entry in entries
+        if ArtifactKind(entry["kind"])
+        in {
+            ArtifactKind.REPORT,
+            ArtifactKind.CHAIR_NOTES,
+            ArtifactKind.POST_MEETING_DISCUSSION,
+        }
+    ]
     existing_statuses = await _artifact_statuses(sessions, dataset_version, meeting.id)
-    report_results: list[dict[str, Any]] = []
-    for entry in sorted(report_entries, key=lambda item: item["filename"].casefold()):
-        if existing_statuses.get((entry["url"], entry["sha256"])) in {
-            "parsed",
-            "quarantined",
-        }:
-            report_results.append({"filename": entry["filename"], "status": "resumed"})
+    enriched_sources = await _enriched_source_artifacts(
+        sessions, dataset_version, meeting.id
+    )
+    source_results: list[dict[str, Any]] = []
+    for entry in sorted(source_entries, key=lambda item: item["filename"].casefold()):
+        artifact_key = (entry["url"], entry["sha256"])
+        if existing_statuses.get(artifact_key) == "quarantined" or artifact_key in enriched_sources:
+            source_results.append(
+                {
+                    "filename": entry["filename"],
+                    "source_role": _entry_source_role(entry),
+                    "status": "resumed",
+                }
+            )
             continue
-        report_results.append(
-            await _ingest_report(settings, sessions, store, dataset_version, meeting, entry)
+        source_results.append(
+            await _ingest_meeting_source_entry(
+                settings, sessions, store, dataset_version, meeting, entry
+            )
         )
     if not meeting.starts_on or not meeting.ends_on:
         await _recover_persisted_report_dates(sessions, dataset_version, meeting)
@@ -279,7 +304,12 @@ async def _ingest_local_meeting(
         "matched_archives": len(matched_ids),
         "missing_archives": sorted(workbook_ids - set(by_document_id)),
         "orphan_archives": orphan_ids,
-        "reports": report_results,
+        "reports": [
+            result
+            for result in source_results
+            if result["source_role"] == SourceRole.REPORT
+        ],
+        "meeting_sources": source_results,
         "document_statuses": dict(status_counts),
         "resumed_documents": skipped,
     }
@@ -471,7 +501,7 @@ async def _record_document_failure(
         await session.commit()
 
 
-async def _ingest_report(
+async def _ingest_meeting_source_entry(
     settings: Settings,
     sessions: Any,
     store: LocalObjectStore,
@@ -482,6 +512,7 @@ async def _ingest_report(
     artifact = await _load_artifact(store, entry)
     filename = entry["filename"]
     lower = filename.casefold()
+    source_role = _entry_source_role(entry)
     if Path(lower).suffix not in {".zip", ".doc", ".docx", ".pdf", ".pptx", ".xlsx"}:
         async with sessions() as session:
             await persist_raw_artifact(
@@ -491,39 +522,39 @@ async def _ingest_report(
                 meeting,
                 filename,
                 artifact,
-                ArtifactKind.REPORT,
+                source_artifact_kind(source_role),
                 parse_status="not_applicable",
                 parse_error="report-directory entry has no supported document extension",
                 ensure_parents=False,
+                source_role=source_role,
+                logical_document_id=source_logical_document_id(
+                    meeting.id, source_role, filename
+                ),
+                document_state=source_document_state(source_role, filename),
             )
             await session.commit()
-        return {"filename": filename, "status": "not_applicable"}
-    authority = (
-        EvidenceAuthority.APPROVED_REPORT
-        if "approved" in lower
-        else EvidenceAuthority.DRAFT_REPORT
-        if "draft" in lower or "skeleton" in lower
-        else EvidenceAuthority.FINAL_REPORT
-    )
+        return {
+            "filename": filename,
+            "source_role": source_role,
+            "status": "not_applicable",
+        }
     try:
         async with sessions() as session:
-            blocks, chunks = await ingest_document_artifact(
+            blocks, chunks, observations = await ingest_meeting_source(
                 session,
                 store,
                 dataset_version,
                 meeting,
-                f"report:{meeting.id}:{entry['sha256'][:12]}",
                 filename,
                 artifact,
+                source_role,
                 settings.chunking,
                 evidence_blocks=settings.evidence_blocks,
                 parser_config=settings.parsers,
-                kind=ArtifactKind.REPORT,
-                authority=authority,
-                ensure_parents=False,
-                assume_new=True,
             )
-            if not meeting.starts_on or not meeting.ends_on:
+            if source_role == SourceRole.REPORT and (
+                not meeting.starts_on or not meeting.ends_on
+            ):
                 starts_on, ends_on = parse_meeting_date_range(
                     " ".join(block.text for block in blocks[:50])
                 )
@@ -536,10 +567,11 @@ async def _ingest_report(
             await session.commit()
         return {
             "filename": filename,
+            "source_role": source_role,
             "status": "ingested",
             "blocks": len(blocks),
             "chunks": len(chunks),
-            "authority": authority.value,
+            "observations": len(observations),
         }
     except Exception as exc:  # noqa: BLE001 - report failure remains visible in reconciliation
         async with sessions() as session:
@@ -550,13 +582,23 @@ async def _ingest_report(
                 meeting,
                 filename,
                 artifact,
-                ArtifactKind.REPORT,
+                source_artifact_kind(source_role),
                 parse_status="failed",
                 parse_error=str(exc),
                 ensure_parents=False,
+                source_role=source_role,
+                logical_document_id=source_logical_document_id(
+                    meeting.id, source_role, filename
+                ),
+                document_state=source_document_state(source_role, filename),
             )
             await session.commit()
-        return {"filename": filename, "status": "failed", "error": str(exc)}
+        return {
+            "filename": filename,
+            "source_role": source_role,
+            "status": "failed",
+            "error": str(exc),
+        }
 
 
 async def _artifact_statuses(
@@ -570,6 +612,22 @@ async def _artifact_statuses(
             )
         )
         return {(row.source_url, row.sha256): row.parse_status for row in rows}
+
+
+async def _enriched_source_artifacts(
+    sessions: Any, dataset_version: str, meeting_id: str
+) -> set[tuple[str, str]]:
+    async with sessions() as session:
+        rows = await session.scalars(
+            select(ArtifactVersionRow).where(
+                ArtifactVersionRow.dataset_version_id == dataset_version,
+                ArtifactVersionRow.meeting_id == meeting_id,
+                ArtifactVersionRow.logical_document_id.is_not(None),
+                ArtifactVersionRow.document_id.is_not(None),
+                ArtifactVersionRow.source_role != SourceRole.OTHER,
+            )
+        )
+        return {(row.source_url, row.sha256) for row in rows}
 
 
 async def _load_artifact(store: LocalObjectStore, entry: dict[str, Any]) -> DownloadedArtifact:
@@ -593,7 +651,22 @@ def _discovered(entry: dict[str, Any]) -> DiscoveredArtifact:
         url=entry["url"],
         filename=entry["filename"],
         meeting_id=entry["meeting_id"],
+        source_role=_entry_source_role(entry),
     )
+
+
+def _entry_source_role(entry: dict[str, Any]) -> SourceRole:
+    explicit = entry.get("source_role")
+    if explicit:
+        return SourceRole(explicit)
+    return {
+        ArtifactKind.REPORT: SourceRole.REPORT,
+        ArtifactKind.CHAIR_NOTES: SourceRole.CHAIR_NOTES,
+        ArtifactKind.POST_MEETING_DISCUSSION: SourceRole.POST_MEETING_DISCUSSION,
+        ArtifactKind.TDOC: SourceRole.TDOC,
+        ArtifactKind.TDOC_LIST: SourceRole.TDOC_LIST,
+        ArtifactKind.AGENDA: SourceRole.AGENDA,
+    }.get(ArtifactKind(entry["kind"]), SourceRole.OTHER)
 
 
 def _meeting_number_variant(meeting_id: str) -> tuple[int, str]:
