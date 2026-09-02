@@ -5,11 +5,16 @@ import os
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 
-from threegpp_kg.config import DatabaseConfig
-from threegpp_kg.constants import DatasetState, EvidenceAuthority
+from threegpp_kg.config import DatabaseConfig, FeatureConfig, NewsletterConfig
+from threegpp_kg.constants import (
+    Conclusion,
+    DatasetState,
+    EvidenceAuthority,
+    NewsletterStatus,
+)
 from threegpp_kg.embedding_backfill import (
     _backfill_lock,
     activate_embedding_profile,
@@ -17,15 +22,52 @@ from threegpp_kg.embedding_backfill import (
 )
 from threegpp_kg.publisher import activate_dataset
 from threegpp_kg.repository import SqlRepository
+from threegpp_kg.service import KnowledgeService
 from threegpp_kg.storage.database import (
     ChunkEmbeddingRow,
     DatasetEmbeddingProfileRow,
     DatasetVersionRow,
     EmbeddingProfileRow,
     EvidenceRow,
+    MeetingRow,
+    NewsletterRow,
     RetrievalChunkRow,
+    TDocRow,
     create_engine_and_session,
 )
+
+
+class NewsletterModelFixture:
+    model_name = "Qwen/Qwen3-32B"
+    revision = "endpoint-managed"
+
+    async def chat_json(self, *args, **kwargs):
+        del args, kwargs
+        paragraph = {
+            "text": "Mobility robustness was agreed",
+            "evidence_ids": ["ev-newsletter"],
+            "organizations": [],
+            "specifications": [],
+            "conclusions": ["agreed"],
+        }
+        kinds = [
+            "material_changes",
+            "decisions",
+            "topic_evolution",
+            "technical_impact",
+            "company_activity",
+            "engineering_implications",
+            "watch_items",
+            "appendix_summary",
+        ]
+        return {
+            "title": "RAN2 analytical update",
+            "executive_summary": [paragraph],
+            "sections": [{"kind": kind, "title": kind, "paragraphs": []} for kind in kinds],
+        }
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.mark.integration
@@ -306,4 +348,103 @@ async def test_backfill_advisory_lock_does_not_block_concurrent_index() -> None:
     async with engine.connect() as connection:
         connection = await connection.execution_options(isolation_level="AUTOCOMMIT")
         await connection.execute(text(f"DROP INDEX CONCURRENTLY IF EXISTS {index_name}"))
+    await engine.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_postgres_newsletter_is_immutable_idempotent_and_reviewable() -> None:
+    database_url = os.getenv("TEST_POSTGRES_URL")
+    if not database_url:
+        pytest.skip("TEST_POSTGRES_URL is not configured")
+    database_name = make_url(database_url).database or ""
+    if not database_name.endswith("_test"):
+        pytest.fail("TEST_POSTGRES_URL must target a database ending in _test")
+
+    engine, sessions = create_engine_and_session(DatabaseConfig(url=database_url))
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("TRUNCATE newsletters, tdocs, meetings, evidence, dataset_versions CASCADE")
+        )
+    now = datetime.now(UTC)
+    async with sessions() as session:
+        session.add(
+            DatasetVersionRow(
+                id="newsletter-integration-v1",
+                state=DatasetState.ACTIVE,
+                created_at=now,
+                activated_at=now,
+                is_active=True,
+                stats={},
+            )
+        )
+        session.add(
+            MeetingRow(
+                id="RAN2-TEST",
+                dataset_version_id="newsletter-integration-v1",
+                working_group_id="RAN2",
+                number=999,
+                variant="",
+                name="RAN2 test meeting",
+                source_url="https://www.3gpp.org/test-meeting",
+                readiness="final_ready",
+            )
+        )
+        session.add(
+            EvidenceRow(
+                id="ev-newsletter",
+                dataset_version_id="newsletter-integration-v1",
+                source_url="https://www.3gpp.org/test-report",
+                artifact_sha256="f" * 64,
+                authority=EvidenceAuthority.FINAL_REPORT,
+                meeting_id="RAN2-TEST",
+                tdoc_id="R2-TEST",
+                excerpt="Mobility robustness was agreed.",
+            )
+        )
+        session.add(
+            TDocRow(
+                id="R2-TEST",
+                dataset_version_id="newsletter-integration-v1",
+                meeting_id="RAN2-TEST",
+                title="Mobility robustness proposal",
+                source="Ericsson",
+                status=Conclusion.AGREED,
+                agenda_description="Mobility robustness",
+                evidence_ids=["ev-newsletter"],
+            )
+        )
+        await session.commit()
+
+    repository = SqlRepository(sessions)
+    service = KnowledgeService(
+        repository,
+        newsletter_config=NewsletterConfig(require_human_approval=True),
+        generation_client=NewsletterModelFixture(),  # type: ignore[arg-type]
+        features=FeatureConfig(newsletter_generation_enabled=True),
+    )
+    generated = await service.build_newsletter("RAN2-TEST", "final", render=True)
+    assert generated.data is not None
+    assert generated.data.status == NewsletterStatus.PENDING_APPROVAL
+    repeated = await service.build_newsletter("RAN2-TEST", "final", render=False)
+    assert repeated.data is not None
+    assert repeated.data.id == generated.data.id
+    assert repeated.data.rendered_sha256 == generated.data.rendered_sha256
+    with pytest.raises(ValueError, match="immutable newsletter packet"):
+        await repository.save_newsletter(
+            generated.data.model_copy(update={"packet_sha256": "0" * 64})
+        )
+
+    approved = await service.review_newsletter(
+        generated.data.id,
+        "approved",
+        "integration-reviewer",
+        "Evidence checked",
+    )
+    assert approved.data and approved.data.status == NewsletterStatus.APPROVED
+    async with sessions() as session:
+        rows = list((await session.scalars(select(NewsletterRow))).all())
+    assert len(rows) == 1
+    assert rows[0].reviewed_by == "integration-reviewer"
+    await service.close_models()
     await engine.dispose()

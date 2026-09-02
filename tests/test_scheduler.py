@@ -4,11 +4,13 @@ import pytest
 from sqlalchemy import select
 
 from threegpp_kg.config import DatabaseConfig
+from threegpp_kg.domain import Meeting
 from threegpp_kg.scheduler import (
     Job,
     JobWorker,
     complete_job,
     enqueue_job,
+    enqueue_newsletter_jobs,
     fail_job,
     finish_leased_job,
     lease_job,
@@ -93,6 +95,43 @@ async def test_database_jobs_are_idempotent_reclaim_expired_leases_and_dead_lett
         )
         assert reclaimed.state == "dead_letter"
         await session.commit()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_delayed_final_report_enqueues_new_immutable_edition(tmp_path) -> None:
+    database = tmp_path / "scheduler-newsletter.db"
+    engine, sessions = create_engine_and_session(
+        DatabaseConfig(url=f"sqlite+aiosqlite:///{database}")
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    provisional = Meeting(
+        id="RAN2-133",
+        working_group_id="RAN2",
+        number=133,
+        name="RAN2 #133",
+        source_url="https://www.3gpp.org/133",
+        readiness="provisional_ready",
+    )
+    async with sessions() as session, session.begin():
+        first = await enqueue_newsletter_jobs(
+            session, dataset_version="dataset-v1", meeting=provisional
+        )
+        duplicate = await enqueue_newsletter_jobs(
+            session, dataset_version="dataset-v1", meeting=provisional
+        )
+    assert [item.payload["edition"] for item in first] == ["provisional"]
+    assert duplicate[0].id == first[0].id
+
+    final = provisional.model_copy(update={"readiness": "final_ready"})
+    async with sessions() as session, session.begin():
+        editions = await enqueue_newsletter_jobs(
+            session, dataset_version="dataset-v1", meeting=final
+        )
+    assert [item.payload["edition"] for item in editions] == ["provisional", "final"]
+    assert editions[0].id == first[0].id
+    assert editions[1].id != first[0].id
     await engine.dispose()
 
 

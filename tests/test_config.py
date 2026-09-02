@@ -36,6 +36,8 @@ def test_default_configuration_loads() -> None:
     assert settings.models.embedding.model == "ibm-granite/granite-embedding-english-r2"
     assert settings.models.embedding.dimensions == 768
     assert settings.models.embedding.revision
+    assert settings.models.generation.model == "Qwen/Qwen3-32B"
+    assert settings.newsletter.last_k_meetings == 5
 
 
 def test_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,6 +49,7 @@ def test_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("THREEGPP_HTTP_MAX_CONCURRENCY", "8")
     monkeypatch.setenv("THREEGPP_PARSER_DOCUMENT_WORKERS", "6")
     monkeypatch.setenv("THREEGPP_DATABASE_PREVIEW_DATASET_VERSION", "candidate-v1")
+    monkeypatch.setenv("THREEGPP_NEWSLETTER_LAST_K_MEETINGS", "7")
     settings = load_settings()
     assert settings.models.embedding.dimensions == 1536
     assert settings.models.embedding.query_max_length == 384
@@ -55,6 +58,7 @@ def test_environment_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.http.max_concurrency == 8
     assert settings.parsers.document_workers == 6
     assert settings.database.preview_dataset_version == "candidate-v1"
+    assert settings.newsletter.last_k_meetings == 7
     load_settings.cache_clear()
 
 

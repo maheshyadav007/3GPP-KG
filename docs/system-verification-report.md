@@ -129,7 +129,7 @@ networked repeated-load measurement before production classification can be rais
 
 ## Incremental verification: local ONNX semantic search
 
-- Verification date: 2026-09-01
+- Verification date: 2026-09-02
 - Proof root: `artifacts/test-runs/semantic-pre-migration-20260901T161014Z/` (local, ignored by Git)
 - Model: `ibm-granite/granite-embedding-english-r2`
 - Immutable revision: `47ea694b257b703fee9253d75c2b1f2985180498`
@@ -170,6 +170,46 @@ but retrieval quality is not production-approved. The canary cannot support an h
 Evidence Recall@10 claim because only four source documents have chunks. A synthetic query set would
 not be equivalent to expert adjudication, so the report leaves this mandatory gate open.
 
+## Incremental verification: WG analytical newsletters
+
+- Verification date: 2026-09-02
+- Branch: `wg-newsletter-generation`
+- Proof root: `artifacts/test-runs/newsletter-20260902T050000Z/` (local, ignored by Git)
+- Real corpus: dataset `latest5-all-wgs-20260830-v2`, meeting `RAN2-135`
+- Generation default: `Qwen/Qwen3-32B` through a configurable OpenAI-compatible endpoint
+
+| Check | Result | Classification |
+|---|---:|---|
+| Python and PostgreSQL suite | 190 passed in 11.55 seconds in a clean local environment | PASS |
+| Ruff / strict mypy / dependency lock / migration drift | Ruff passed; mypy passed for 42 source files; `uv lock --check` and Alembic checks passed | PASS |
+| Migration exercises | Existing database upgraded to `0007`; fresh install, downgrade, upgrade, and drift check passed | PASS |
+| Deterministic all-TDoc scan | Test packet processed 128/128 TDocs, exceeding the former 100-result limit | PASS |
+| Real RAN2 packet | 1,341/1,341 meeting TDocs in appendix; completeness `complete`; confidence 1.0; no warnings | READY WITH LIMITATIONS |
+| Real packet analysis | 100 ranked signals, 126 topic trends, 21 revision analyses, 254 technical impacts, 16 engineering implications, and 100 watch items | READY WITH LIMITATIONS |
+| Packet latency and process memory | Repeated local build approximately 1.67 seconds; maximum RSS approximately 224 MB | READY WITH LIMITATIONS |
+| Cross-process determinism | `PYTHONHASHSEED=1` and `2` produced packet ID `newsletter-RAN2-135-provisional-23b1446317a57f3772c7` and SHA-256 `2b710b7522052edd3ace6651b18afa4cb3bee77c7ff6fc417641d726470cc106`; one database row remained | PASS |
+| Persistence and review | Immutable editions, idempotent save, failed-render retention, approval/rejection metadata, and approved-only retrieval passed | PASS |
+| Provisional/final behavior | Distinct scheduler idempotency keys and provisional-to-final delta tests passed | PASS |
+| Frozen Qwen validator | Strict schema, all required sections, citation existence, numbers, organizations, specifications, conclusions, endpoint failures, and publication rejection passed | PASS |
+| Newsletter module coverage | 92% combined line/branch-aware coverage | PASS |
+| Repository-wide coverage | 80.34%, below configured 85% gate | NOT READY |
+| Full mutation run | 1,394/2,011 mutants killed; 69.32%, below required 80% | NOT READY |
+| Live Qwen3-32B rendering | NOT RUN: no configured endpoint was available | NOT READY |
+| Twenty-meeting telecom expert review | NOT RUN | NOT READY |
+
+The deterministic builder reads canonical meeting TDocs directly rather than calling a capped search
+tool. It compares the previous five WG meetings, keeps source facts separate from engineering
+implications, calculates auditable signal components, and retains a complete TDoc appendix. The
+renderer receives only the bounded packet and a versioned prompt. It cannot retrieve additional
+corpus content, and persisted prose remains pending until a human approves it.
+
+The real RAN2 run demonstrates corpus-scale packet construction and deterministic persistence for
+one meeting; it does not prove usefulness, omission rate, neutrality, or factual quality across all
+working groups. The local timing was not a controlled load benchmark. Therefore deterministic
+packets are **READY WITH LIMITATIONS**. Qwen-rendered prose is **NOT READY**, and
+`newsletter_generation_enabled` remains false by default until the live-model and expert-review
+gates pass.
+
 ## Readiness conclusion
 
 **Overall status: NOT READY for production.**
@@ -177,9 +217,9 @@ not be equivalent to expert adjudication, so the report leaves this mandatory ga
 The implementation is a working, tested vertical slice: configuration, source discovery, artifact
 handling, evidence-addressable parsing, temporal graph structures, hybrid retrieval, MCP contracts,
 job leases, atomic publication, deterministic briefing packets, and the graph UI are present. The
-local deterministic suite passes, the selected high-risk modules exceed the requested coverage and
-mutation thresholds, and live source-directory validation passed for four meetings in each target
-working group.
+local deterministic suite passes, earlier selected high-risk modules exceeded their mutation target,
+and live source-directory validation passed for four meetings in each target working group. The
+current repository-wide newsletter branch does not meet the configured coverage or mutation gates.
 
 Production release is blocked because mandatory acceptance evidence is still absent: no complete
 24-month backfill, no 150-question expert retrieval evaluation, no
@@ -221,8 +261,8 @@ evidence, retrieval, and publication modules meet or exceed 85% branch coverage.
 | Hybrid retrieval | READY WITH LIMITATIONS | Pinned local ONNX, profile isolation, resumable vectors, HNSW, fallback, parity and M4 latency pass. Expert Recall@10 and challenger comparison remain unverified. |
 | MCP/API/OIDC | READY WITH LIMITATIONS | Required tools, envelopes, temporal argument rules, pagination, bounds and OIDC validation pass tests. No deployed identity-provider integration or network soak test. |
 | Scheduler and publication | READY WITH LIMITATIONS | Idempotent jobs, leases, reclaim, retry and dead-letter pass component tests; atomic activation also passes PostgreSQL. Continuous operation is unverified. |
-| Deterministic newsletter packet | READY WITH LIMITATIONS | Evidence-backed packet generation and publication guards pass. Corpus-level usefulness has not been evaluated by domain experts. |
-| Newsletter prose generation | NOT READY | Frozen endpoint behavior passes; no live generative-model gate was run. The feature flag remains disabled. |
+| Deterministic newsletter packet | READY WITH LIMITATIONS | All-TDoc construction, evidence scoring, immutable editions, real RAN2 generation, cross-process determinism, scheduler behavior and publication guards pass. Coverage/mutation gates and 20-meeting domain review remain open. |
+| Newsletter prose generation | NOT READY | Strict frozen-endpoint validation passes; no live Qwen3-32B or human usefulness gate was run. The feature flag remains disabled. |
 | Graph UI/document reader | READY WITH LIMITATIONS | Complete single-meeting projections, meeting-scoped autocomplete, worker layout, section navigation, desktop reader resizing and the narrow-screen overlay are browser/component-verified. Dependency advisories and formal accessibility evidence remain open. |
 | Backup, restore and disaster recovery | READY WITH LIMITATIONS | Local `pg_dump`/`pg_restore` passed. Full-corpus filesystem snapshot, point-in-time recovery and disaster drill remain unverified. |
 
@@ -243,7 +283,7 @@ evidence, retrieval, and publication modules meet or exceed 85% branch coverage.
 | Required MCP tool inventory and argument rules | MCP server, domain schemas | tool registration, temporal exclusivity and cursor tests | PASS | JUnit |
 | OIDC/OAuth and bounded API behavior | security middleware, API | OIDC discovery/JWKS, protected routes, graph bounds and missing document tests | PASS with mocks | JUnit |
 | Self-healing jobs, leases and dead-letter handling | scheduler, worker | lease, duplicate, expiry, owner, backoff, dead-letter and handler tests | PASS on SQLite | JUnit |
-| Deterministic newsletter and unsupported-claim rejection | newsletter packet and renderer | deterministic packet, absent/incomplete, citations, numbers and organizations tests | PASS with frozen model responses | JUnit, coverage |
+| Deterministic newsletter and unsupported-claim rejection | newsletter packet and renderer | all-TDoc packet, cross-meeting revisions/trends, persistence, citations, numbers, organizations, specifications and conclusions tests | PASS with frozen model responses; live model NOT RUN | newsletter proof root, JUnit, coverage, mutation |
 | OpenAI-compatible model failure behavior | model client | auth, timeout/rate-limit retry, malformed/partial response, dimension and provider tests | PASS with `respx` | JUnit |
 | Searchable graph UI and document reader | `web/`, graph API | API route tests, ESLint, production build, live section expansion and jump | PASS locally with limitations | npm audit, build output, incremental UI screenshots |
 | Local database backup and restore | PostgreSQL/pgvector | `pg_dump`, `pg_restore`, row/index/version reconciliation | PASS for fixture corpus | backup/restore proof |
@@ -287,8 +327,11 @@ encryption, retention and snapshot restoration.
    snapshot restoration exercises.
 6. Expert-score the pinned 149M embedding profile and the 311M/97M challengers. Retain the default
    only if Evidence Recall@10 reaches 90% and the challenger policy is satisfied.
-7. Run the separate live generative-model evaluation before enabling newsletter prose. Newsletter
-   generation must remain disabled until that gate passes.
+7. Raise current repository coverage from 80.34% to 85% and mutation score from 69.32% to 80%, then
+   rerun the complete proof manifest.
+8. Expert-review deterministic packets for at least 20 meetings across all supported WGs.
+9. Run the separate live Qwen3-32B evaluation before enabling newsletter prose. Newsletter
+   generation must remain disabled until both model and human-review gates pass.
 
 ## Reproduction
 

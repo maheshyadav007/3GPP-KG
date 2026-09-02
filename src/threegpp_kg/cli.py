@@ -13,7 +13,10 @@ from .embedding_backfill import benchmark_cached_embeddings, run_embedding_backf
 from .graph_repair import rebuild_graph
 from .local_ingest import ingest_local_manifests
 from .mirror import benchmark_download_concurrency, mirror_working_group
+from .models.client import create_model_client
 from .publisher import activate_dataset, assess_activation_readiness
+from .repository import SqlRepository
+from .service import KnowledgeService
 from .source_validation import validate_configured_sources, write_validation_result
 from .storage.database import create_engine_and_session
 
@@ -92,6 +95,23 @@ def main() -> None:
     embedding_benchmark.add_argument("--dataset-version", required=True)
     embedding_benchmark.add_argument("--sample-size", type=int, default=64)
     embedding_benchmark.add_argument("--output", type=Path)
+    newsletter = subparsers.add_parser(
+        "build-newsletter",
+        help="build and persist an evidence packet, optionally rendering analytical prose",
+    )
+    newsletter.add_argument("--meeting", required=True)
+    newsletter.add_argument("--edition", choices=["provisional", "final"], default="provisional")
+    newsletter.add_argument("--last-k-meetings", type=int)
+    newsletter.add_argument("--render", action="store_true")
+    newsletter.add_argument("--output", type=Path)
+    review = subparsers.add_parser(
+        "review-newsletter", help="approve or reject a rendered immutable newsletter"
+    )
+    review.add_argument("--newsletter-id", required=True)
+    review.add_argument("--decision", choices=["approved", "rejected"], required=True)
+    review.add_argument("--reviewer", required=True)
+    review.add_argument("--notes", default="")
+    review.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -230,6 +250,28 @@ def main() -> None:
         )
         _write_optional_json(args.output, result)
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "build-newsletter":
+        result = asyncio.run(
+            _build_newsletter(
+                args.meeting,
+                args.edition,
+                render=args.render,
+                last_k_meetings=args.last_k_meetings,
+            )
+        )
+        _write_optional_json(args.output, result)
+        print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "review-newsletter":
+        result = asyncio.run(
+            _review_newsletter(
+                args.newsletter_id,
+                args.decision,
+                args.reviewer,
+                args.notes,
+            )
+        )
+        _write_optional_json(args.output, result)
+        print(json.dumps(result, indent=2, sort_keys=True))
 
 
 def _write_optional_json(output: Path | None, result: dict[str, object]) -> None:
@@ -265,6 +307,75 @@ async def _rebuild_existing_graph(dataset_version_id: str) -> dict[str, object]:
             result = await rebuild_graph(session, dataset_version_id)
             await session.commit()
             return result
+    finally:
+        await engine.dispose()
+
+
+async def _build_newsletter(
+    meeting_id: str,
+    edition: str,
+    *,
+    render: bool,
+    last_k_meetings: int | None,
+) -> dict[str, object]:
+    settings = load_settings()
+    if settings.database.mode != "sql":
+        raise ValueError("newsletter persistence requires database.mode=sql")
+    if render and not settings.features.newsletter_generation_enabled:
+        raise ValueError("newsletter rendering is disabled by configuration")
+    newsletter_config = settings.newsletter.model_copy(
+        update=({"last_k_meetings": last_k_meetings} if last_k_meetings is not None else {})
+    )
+    generation_client = (
+        create_model_client(
+            settings.models.generation,
+            timeout_seconds=settings.models.timeout_seconds,
+            retries=settings.models.retries,
+        )
+        if render
+        else None
+    )
+    engine, sessions = create_engine_and_session(settings.database)
+    service = KnowledgeService(
+        SqlRepository(
+            sessions,
+            settings.retrieval,
+            preview_dataset_version=settings.database.preview_dataset_version,
+        ),
+        newsletter_config=newsletter_config,
+        generation_client=generation_client,
+        features=settings.features,
+    )
+    try:
+        result = await service.build_newsletter(meeting_id, edition, render=render)
+        return result.model_dump(mode="json")
+    finally:
+        await service.close_models()
+        await engine.dispose()
+
+
+async def _review_newsletter(
+    newsletter_id: str,
+    decision: str,
+    reviewer: str,
+    notes: str,
+) -> dict[str, object]:
+    settings = load_settings()
+    if settings.database.mode != "sql":
+        raise ValueError("newsletter review requires database.mode=sql")
+    engine, sessions = create_engine_and_session(settings.database)
+    service = KnowledgeService(
+        SqlRepository(
+            sessions,
+            settings.retrieval,
+            preview_dataset_version=settings.database.preview_dataset_version,
+        ),
+        newsletter_config=settings.newsletter,
+        features=settings.features,
+    )
+    try:
+        result = await service.review_newsletter(newsletter_id, decision, reviewer, notes)
+        return result.model_dump(mode="json")
     finally:
         await engine.dispose()
 

@@ -288,11 +288,36 @@ class NewsletterRow(Base):
     meeting_id: Mapped[str] = mapped_column(String(80), index=True)
     edition: Mapped[str] = mapped_column(String(20), index=True)
     packet: Mapped[dict[str, Any]] = mapped_column(JSON)
-    rendered: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    rendered: Mapped[dict[str, Any] | None] = mapped_column(JSON(none_as_null=True))
     evidence_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="packet_ready")
+    packet_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    rendered_sha256: Mapped[str | None] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(255))
+    model_revision: Mapped[str | None] = mapped_column(String(100))
+    prompt_version: Mapped[str | None] = mapped_column(String(40))
+    generation_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_notes: Mapped[str | None] = mapped_column(Text)
 
-    __table_args__ = (UniqueConstraint("dataset_version_id", "meeting_id", "edition"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_version_id",
+            "meeting_id",
+            "edition",
+            "packet_sha256",
+            name="uq_newsletter_immutable_edition",
+        ),
+        Index(
+            "ix_newsletters_latest",
+            "dataset_version_id",
+            "meeting_id",
+            "edition",
+            "created_at",
+        ),
+    )
 
 
 class KnowledgeEdgeRow(Base):

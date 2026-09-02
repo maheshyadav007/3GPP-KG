@@ -69,9 +69,7 @@ async def test_graph_is_bounded_and_contains_typed_nodes(service) -> None:
         )
         assert balanced.status_code == 200
         assert {
-            node["label"]
-            for node in balanced.json()["data"]["nodes"]
-            if node["type"] == "meeting"
+            node["label"] for node in balanced.json()["data"]["nodes"] if node["type"] == "meeting"
         } == {"RAN2-133"}
 
 
@@ -96,8 +94,24 @@ async def test_search_meetings_newsletter_and_missing_document_routes(service) -
         assert newsletter.status_code == 200
         assert newsletter.json()["data"]["edition"] == "final"
 
+        generated = await client.post(
+            "/api/newsletters/RAN2-133/generate",
+            params={"edition": "provisional"},
+        )
+        assert generated.status_code == 200
+        assert generated.json()["data"]["status"] == "packet_ready"
+        record = await client.get("/api/newsletters/RAN2-133/record")
+        assert record.status_code == 200
+        assert record.json()["data"]["packet"]["totals"]["tdocs"] == 3
+        cannot_review = await client.post(
+            f"/api/newsletter-reviews/{record.json()['data']['id']}",
+            params={"decision": "approved", "reviewer": "architect@example.com"},
+        )
+        assert cannot_review.status_code == 409
+
         assert (await client.get("/api/tdocs/missing")).status_code == 404
         assert (await client.get("/api/newsletters/missing")).status_code == 404
+        assert (await client.get("/api/newsletters/missing/record")).status_code == 404
 
 
 @pytest.mark.asyncio
@@ -133,9 +147,7 @@ async def test_complete_meeting_graph_and_scoped_facets(service) -> None:
         assert boundary["boundary"] is True
         assert body["evidence"][0]["id"] == "ev-1"
 
-        companies = await client.get(
-            "/api/meetings/RAN2-133/facets/company", params={"q": "er"}
-        )
+        companies = await client.get("/api/meetings/RAN2-133/facets/company", params={"q": "er"})
         assert companies.status_code == 200
         assert companies.json()["data"] == [
             {"id": "ericsson", "label": "Ericsson", "tdoc_count": 2}
@@ -161,9 +173,7 @@ async def test_complete_meeting_graph_and_scoped_facets(service) -> None:
         )
         assert any_filtered.json()["data"]["counts"]["tdocs"] == 2
         assert (await client.get("/api/meetings/missing/graph")).status_code == 404
-        assert (
-            await client.get("/api/meetings/RAN2-133/facets/unsupported")
-        ).status_code == 422
+        assert (await client.get("/api/meetings/RAN2-133/facets/unsupported")).status_code == 422
 
 
 @pytest.mark.asyncio
@@ -190,9 +200,7 @@ async def test_complete_working_group_graph_resolves_cross_meeting_revisions(
             "tdoc_ids": ["R2-0", "R2-1", "R2-2", "R2-3"],
             "meeting_ids": ["RAN2-132", "RAN2-133"],
         }
-        predecessor = next(
-            node for node in body["data"]["nodes"] if node["id"] == "tdoc:R2-0"
-        )
+        predecessor = next(node for node in body["data"]["nodes"] if node["id"] == "tdoc:R2-0")
         assert predecessor["boundary"] is False
         highlighted = [
             edge
@@ -201,9 +209,7 @@ async def test_complete_working_group_graph_resolves_cross_meeting_revisions(
         ]
         assert len(highlighted) == 3
 
-        companies = await client.get(
-            "/api/working-groups/RAN2/facets/company", params={"q": "eri"}
-        )
+        companies = await client.get("/api/working-groups/RAN2/facets/company", params={"q": "eri"})
         assert companies.json()["data"] == [
             {"id": "ericsson", "label": "Ericsson", "tdoc_count": 2}
         ]

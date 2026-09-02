@@ -96,7 +96,13 @@ packages = ["threegpp_kg"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["boto3", "botocore.exceptions", "onnxruntime", "sentence_transformers"]
+module = [
+  "boto3",
+  "botocore.exceptions",
+  "huggingface_hub",
+  "onnxruntime",
+  "sentence_transformers",
+]
 ignore_missing_imports = true
 
 [tool.mutmut]

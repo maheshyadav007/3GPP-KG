@@ -122,6 +122,15 @@ class RetrievalConfig(BaseModel):
     lexical_weight: float = Field(1.0, ge=0)
 
 
+class NewsletterConfig(BaseModel):
+    last_k_meetings: int = Field(5, ge=1, le=20)
+    max_signal_items: int = Field(100, ge=10, le=500)
+    max_render_evidence_items: int = Field(200, ge=10, le=1000)
+    evidence_excerpt_chars: int = Field(1200, ge=100, le=5000)
+    require_human_approval: bool = True
+    minimum_evidence_coverage: float = Field(1.0, ge=0, le=1)
+
+
 class ModelEndpointConfig(BaseModel):
     provider: Literal["openai_compatible", "onnx"] = "openai_compatible"
     base_url: str | None = None
@@ -215,6 +224,7 @@ class Settings(BaseModel):
     chunking: ChunkingConfig
     parsers: ParserConfig
     retrieval: RetrievalConfig
+    newsletter: NewsletterConfig
     models: ModelsConfig
     features: FeatureConfig
     graph: GraphConfig
@@ -349,6 +359,24 @@ ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "THREEGPP_RERANK_BASE_URL": ("models", "rerank", "base_url"),
     "THREEGPP_RERANK_MODEL": ("models", "rerank", "model"),
     "THREEGPP_RERANK_API_KEY": ("models", "rerank", "api_key"),
+    "THREEGPP_NEWSLETTER_LAST_K_MEETINGS": ("newsletter", "last_k_meetings"),
+    "THREEGPP_NEWSLETTER_MAX_SIGNAL_ITEMS": ("newsletter", "max_signal_items"),
+    "THREEGPP_NEWSLETTER_MAX_RENDER_EVIDENCE_ITEMS": (
+        "newsletter",
+        "max_render_evidence_items",
+    ),
+    "THREEGPP_NEWSLETTER_EVIDENCE_EXCERPT_CHARS": (
+        "newsletter",
+        "evidence_excerpt_chars",
+    ),
+    "THREEGPP_NEWSLETTER_REQUIRE_HUMAN_APPROVAL": (
+        "newsletter",
+        "require_human_approval",
+    ),
+    "THREEGPP_NEWSLETTER_MINIMUM_EVIDENCE_COVERAGE": (
+        "newsletter",
+        "minimum_evidence_coverage",
+    ),
     "THREEGPP_GENERATION_PROVIDER": ("models", "generation", "provider"),
     "THREEGPP_GENERATION_BASE_URL": ("models", "generation", "base_url"),
     "THREEGPP_GENERATION_MODEL": ("models", "generation", "model"),

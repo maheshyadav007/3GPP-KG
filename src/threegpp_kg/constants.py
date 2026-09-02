@@ -121,6 +121,18 @@ class Readiness(StrEnum):
     NOT_READY = "NOT READY"
 
 
+class NewsletterStatus(StrEnum):
+    PACKET_READY = "packet_ready"
+    GENERATION_FAILED = "generation_failed"
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+NEWSLETTER_PACKET_VERSION = "2.0"
+NEWSLETTER_PROMPT_VERSION = "1.0"
+
+
 STATUS_ALIASES: dict[str, Conclusion] = {
     "available": Conclusion.AVAILABLE,
     "agreed": Conclusion.AGREED,

@@ -244,6 +244,24 @@ def create_mcp_server(service: KnowledgeService) -> FastMCP:
         return (await service.newsletter_packet(meeting_id, edition)).model_dump(mode="json")
 
     @mcp.tool()
+    async def get_newsletter_packet(
+        meeting_id: str, edition: str = "provisional"
+    ) -> dict[str, Any]:
+        """Get the complete deterministic packet, scores, appendix, and evidence catalog."""
+        return (await service.newsletter_packet(meeting_id, edition)).model_dump(mode="json")
+
+    @mcp.tool()
+    async def get_published_newsletter(
+        meeting_id: str,
+        edition: str = "final",
+        approved_only: bool = True,
+    ) -> dict[str, Any]:
+        """Get persisted analytical prose; approved-only is the safe default."""
+        return (
+            await service.get_newsletter_record(meeting_id, edition, approved_only=approved_only)
+        ).model_dump(mode="json")
+
+    @mcp.tool()
     async def search_topics(
         query: str,
         working_groups: list[str] | None = None,

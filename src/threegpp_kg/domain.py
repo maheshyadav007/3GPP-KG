@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from .constants import BlockKind, Conclusion, EvidenceAuthority, MatchMode
+from .constants import BlockKind, Conclusion, EvidenceAuthority, MatchMode, NewsletterStatus
 
 
 class TemporalScope(BaseModel):
@@ -178,17 +178,130 @@ class SearchRequest(BaseModel):
     cursor: str | None = None
 
 
+class SignalScore(BaseModel):
+    authority: float = Field(ge=0, le=1)
+    final_status: float = Field(ge=0, le=1)
+    revision_depth: float = Field(ge=0, le=1)
+    cross_company: float = Field(ge=0, le=1)
+    specification_impact: float = Field(ge=0, le=1)
+    novelty: float = Field(ge=0, le=1)
+    persistence: float = Field(ge=0, le=1)
+    total: float = Field(ge=0, le=100)
+
+
+class NewsletterSignal(BaseModel):
+    id: str
+    category: str
+    headline: str
+    detail: str
+    tdoc_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(min_length=1)
+    score: SignalScore
+    fact_or_inference: Literal["fact", "engineering_implication"] = "fact"
+
+
+class TopicTrend(BaseModel):
+    topic: str
+    classification: Literal["new", "accelerating", "declining", "persistent", "contested", "stable"]
+    counts_by_meeting: dict[str, int]
+    statuses: list[Conclusion] = Field(default_factory=list)
+    companies: list[str] = Field(default_factory=list)
+    tdoc_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class RevisionAnalysis(BaseModel):
+    chain: list[str]
+    depth: int = Field(ge=1)
+    meeting_ids: list[str]
+    final_status: Conclusion
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class TechnicalImpact(BaseModel):
+    kind: Literal["specification", "release", "work_item", "change_request"]
+    identifier: str
+    tdoc_ids: list[str]
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class TDocAppendixEntry(BaseModel):
+    id: str
+    title: str
+    source: str
+    agenda_item: str
+    topic: str
+    status: Conclusion
+    revised_from: str | None = None
+    revised_to: str | None = None
+    specifications: list[str] = Field(default_factory=list)
+    releases: list[str] = Field(default_factory=list)
+    work_items: list[str] = Field(default_factory=list)
+    change_request: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class PacketEvidence(BaseModel):
+    id: str
+    authority: EvidenceAuthority
+    tdoc_id: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+    excerpt: str
+
+
+class NewsletterDelta(BaseModel):
+    provisional_packet_id: str | None = None
+    added_signal_ids: list[str] = Field(default_factory=list)
+    removed_signal_ids: list[str] = Field(default_factory=list)
+    changed_conclusions: list[dict[str, str]] = Field(default_factory=list)
+
+
 class NewsletterPacket(BaseModel):
+    id: str
+    packet_version: str
+    dataset_version: str
     meeting: Meeting
     edition: Literal["provisional", "final"]
     generated_at: datetime
+    comparison_meetings: list[Meeting] = Field(default_factory=list)
+    comparison_window: int = Field(ge=1)
     totals: dict[str, int]
     decisions: dict[str, list[TDoc]]
     hot_topics: list[dict[str, Any]]
     company_activity: list[dict[str, Any]]
     revision_chains: list[list[str]]
     affected_specs: list[dict[str, Any]]
+    signals: list[NewsletterSignal] = Field(default_factory=list)
+    topic_trends: list[TopicTrend] = Field(default_factory=list)
+    revision_analysis: list[RevisionAnalysis] = Field(default_factory=list)
+    technical_impacts: list[TechnicalImpact] = Field(default_factory=list)
+    conclusion_changes: list[dict[str, Any]] = Field(default_factory=list)
+    engineering_implications: list[NewsletterSignal] = Field(default_factory=list)
+    watch_items: list[NewsletterSignal] = Field(default_factory=list)
+    tdoc_appendix: list[TDocAppendixEntry] = Field(default_factory=list)
+    evidence_catalog: list[PacketEvidence] = Field(default_factory=list)
+    provisional_to_final: NewsletterDelta | None = None
     evidence_ids: list[str]
+
+
+class NewsletterRecord(BaseModel):
+    id: str
+    dataset_version: str
+    meeting_id: str
+    edition: Literal["provisional", "final"]
+    packet: NewsletterPacket
+    rendered: dict[str, Any] | None = None
+    status: NewsletterStatus
+    packet_sha256: str
+    rendered_sha256: str | None = None
+    model: str | None = None
+    model_revision: str | None = None
+    prompt_version: str | None = None
+    generation_error: str | None = None
+    created_at: datetime
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+    review_notes: str | None = None
 
 
 class Envelope[T](BaseModel):

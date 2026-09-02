@@ -83,3 +83,66 @@ def test_embedding_benchmark_cli_passes_sample_size(monkeypatch, capsys) -> None
         "dataset_version": "dataset-v1",
         "sample_size": 7,
     }
+
+
+def test_newsletter_build_and_review_cli(monkeypatch, tmp_path) -> None:
+    async def fake_build(meeting, edition, *, render, last_k_meetings):
+        return {
+            "meeting": meeting,
+            "edition": edition,
+            "render": render,
+            "last_k_meetings": last_k_meetings,
+        }
+
+    async def fake_review(newsletter_id, decision, reviewer, notes):
+        return {
+            "newsletter_id": newsletter_id,
+            "decision": decision,
+            "reviewer": reviewer,
+            "notes": notes,
+        }
+
+    build_output = tmp_path / "newsletter.json"
+    monkeypatch.setattr(cli, "_build_newsletter", fake_build)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "threegpp-kg",
+            "build-newsletter",
+            "--meeting",
+            "RAN2-133",
+            "--edition",
+            "final",
+            "--last-k-meetings",
+            "5",
+            "--render",
+            "--output",
+            str(build_output),
+        ],
+    )
+    cli.main()
+    assert json.loads(build_output.read_text())["render"] is True
+
+    review_output = tmp_path / "review.json"
+    monkeypatch.setattr(cli, "_review_newsletter", fake_review)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "threegpp-kg",
+            "review-newsletter",
+            "--newsletter-id",
+            "newsletter-1",
+            "--decision",
+            "approved",
+            "--reviewer",
+            "architect@example.com",
+            "--notes",
+            "verified",
+            "--output",
+            str(review_output),
+        ],
+    )
+    cli.main()
+    assert json.loads(review_output.read_text())["decision"] == "approved"

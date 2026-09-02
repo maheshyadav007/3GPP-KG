@@ -1,26 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
-from datetime import UTC, datetime
+import hashlib
+import json
 from typing import Any
 
-from .constants import Conclusion, MatchMode
+from .config import FeatureConfig, NewsletterConfig
+from .constants import (
+    NEWSLETTER_PROMPT_VERSION,
+    MatchMode,
+    NewsletterStatus,
+)
 from .domain import (
     Envelope,
     Meeting,
     NewsletterPacket,
+    NewsletterRecord,
     Passage,
     RetrievalMetadata,
     SearchFilters,
     SearchRequest,
     TDoc,
     TDocDetail,
-    TemporalScope,
 )
 from .graph_view import FacetKind, build_graph, build_scope_graph, facet_options, filter_tdocs
 from .models.base import EmbeddingClient
 from .models.client import ModelEndpointError, OpenAICompatibleClient
+from .newsletter import NewsletterPacketBuilder, NewsletterRenderer
 from .repository import InMemoryRepository, Repository, decode_cursor, encode_cursor
 
 
@@ -30,10 +36,20 @@ class KnowledgeService:
         repository: Repository,
         embedding_client: EmbeddingClient | None = None,
         rerank_client: OpenAICompatibleClient | None = None,
+        newsletter_config: NewsletterConfig | None = None,
+        generation_client: OpenAICompatibleClient | None = None,
+        features: FeatureConfig | None = None,
     ) -> None:
         self.repository = repository
         self.embedding_client = embedding_client
         self.rerank_client = rerank_client
+        self.newsletter_config = newsletter_config or NewsletterConfig()
+        self.newsletter_builder = NewsletterPacketBuilder(self.newsletter_config)
+        self.generation_client = generation_client
+        self.features = features or FeatureConfig()
+        self.newsletter_renderer = NewsletterRenderer(
+            self.features, generation_client, self.newsletter_config
+        )
 
     async def list_meetings(
         self,
@@ -135,9 +151,7 @@ class KnowledgeService:
         )
         full_graph = build_scope_graph(meetings, all_tdocs)
         graph = (
-            full_graph
-            if len(selected) == len(all_tdocs)
-            else build_scope_graph(meetings, selected)
+            full_graph if len(selected) == len(all_tdocs) else build_scope_graph(meetings, selected)
         )
         return await self._graph_envelope(
             meetings=meetings,
@@ -179,9 +193,7 @@ class KnowledgeService:
             confidence=1.0,
         )
 
-    async def _working_group_scope(
-        self, working_group_id: str
-    ) -> tuple[list[Meeting], list[TDoc]]:
+    async def _working_group_scope(self, working_group_id: str) -> tuple[list[Meeting], list[TDoc]]:
         meetings: list[Meeting] = []
         cursor: str | None = None
         while True:
@@ -202,9 +214,7 @@ class KnowledgeService:
                     )
                 )
             )
-        return meetings, sorted(
-            (tdoc for page in pages for tdoc in page), key=lambda item: item.id
-        )
+        return meetings, sorted((tdoc for page in pages for tdoc in page), key=lambda item: item.id)
 
     async def _graph_envelope(
         self,
@@ -438,6 +448,11 @@ class KnowledgeService:
             await self.embedding_client.close()
         if self.rerank_client and self.rerank_client is not self.embedding_client:
             await self.rerank_client.close()
+        if self.generation_client and self.generation_client not in {
+            self.embedding_client,
+            self.rerank_client,
+        }:
+            await self.generation_client.close()
 
     async def semantic_health(self) -> dict[str, Any]:
         database_status = await self.repository.embedding_status()
@@ -510,12 +525,9 @@ class KnowledgeService:
     ) -> Envelope[NewsletterPacket | None]:
         if edition not in {"provisional", "final"}:
             raise ValueError("edition must be provisional or final")
-        meeting_request = SearchRequest(
-            filters=SearchFilters(temporal=TemporalScope(meeting_ids=[meeting_id])), top_k=1
-        )
-        meetings, _ = await self.repository.list_meetings([], meeting_request)
         version = await self.repository.active_dataset_version()
-        if not meetings:
+        meeting = await self.repository.meeting(meeting_id)
+        if meeting is None:
             return Envelope(
                 data=None,
                 dataset_version=version,
@@ -523,62 +535,228 @@ class KnowledgeService:
                 confidence=0,
                 warnings=[f"Meeting {meeting_id} was not found"],
             )
-        tdocs, _ = await self.repository.search_tdocs(
+        wg_meetings, _ = await self.repository.list_meetings(
+            [meeting.working_group_id],
             SearchRequest(
-                filters=SearchFilters(temporal=TemporalScope(meeting_ids=[meeting_id])),
                 top_k=100,
+            ),
+        )
+        current_index = next(
+            (index for index, item in enumerate(wg_meetings) if item.id == meeting.id), None
+        )
+        if current_index is None:
+            comparison_meetings = [meeting]
+        else:
+            older = wg_meetings[
+                current_index + 1 : current_index + 1 + self.newsletter_config.last_k_meetings
+            ]
+            comparison_meetings = [*reversed(older), meeting]
+        tdocs_by_meeting = {
+            item.id: await self.repository.meeting_tdocs(item.id) for item in comparison_meetings
+        }
+        all_evidence_ids = list(
+            dict.fromkeys(
+                evidence_id
+                for selected in tdocs_by_meeting.values()
+                for tdoc in selected
+                for evidence_id in tdoc.evidence_ids
             )
         )
-        status_groups: dict[str, list[TDoc]] = {}
-        for status in Conclusion:
-            selected = [tdoc for tdoc in tdocs if tdoc.status == status]
-            if selected:
-                status_groups[status.value] = selected
-        companies: Counter[str] = Counter()
-        topics: Counter[str] = Counter()
-        specs: Counter[str] = Counter()
-        revision_chains: list[list[str]] = []
-        for tdoc in tdocs:
-            companies.update(part.strip() for part in tdoc.source.split(",") if part.strip())
-            if tdoc.agenda_description:
-                topics[tdoc.agenda_description] += 1
-            specs.update(tdoc.specifications)
-            if tdoc.revised_to:
-                revision_chains.append([tdoc.id, tdoc.revised_to])
-        evidence_ids = list(dict.fromkeys(eid for tdoc in tdocs for eid in tdoc.evidence_ids))
-        missing_evidence = [tdoc.id for tdoc in tdocs if not tdoc.evidence_ids]
-        packet = NewsletterPacket(
-            meeting=meetings[0],
+        evidence = await self.repository.evidence(all_evidence_ids)
+        packet = self.newsletter_builder.build(
+            meeting=meeting,
+            dataset_version=version,
+            comparison_meetings=comparison_meetings,
+            tdocs_by_meeting=tdocs_by_meeting,
+            evidence=evidence,
             edition="final" if edition == "final" else "provisional",
-            generated_at=datetime.now(UTC),
-            totals={"tdocs": len(tdocs), **dict(Counter(tdoc.status.value for tdoc in tdocs))},
-            decisions=status_groups,
-            hot_topics=[
-                {"topic": key, "tdoc_count": value} for key, value in topics.most_common(10)
-            ],
-            company_activity=[
-                {"company": key, "tdoc_count": value} for key, value in companies.most_common(10)
-            ],
-            revision_chains=revision_chains,
-            affected_specs=[
-                {"specification": key, "tdoc_count": value} for key, value in specs.most_common()
-            ],
-            evidence_ids=evidence_ids,
+            provisional_packet=(
+                provisional.packet
+                if edition == "final"
+                and (
+                    provisional := await self.repository.latest_newsletter(
+                        meeting.id, "provisional", across_datasets=True
+                    )
+                )
+                else None
+            ),
         )
-        evidence = await self.repository.evidence(evidence_ids)
+        current_tdocs = tdocs_by_meeting[meeting.id]
+        resolved_evidence = {item.id for item in evidence if (item.excerpt or "").strip()}
+        missing_evidence = [
+            tdoc.id
+            for tdoc in current_tdocs
+            if not tdoc.evidence_ids or not set(tdoc.evidence_ids) & resolved_evidence
+        ]
         warnings: list[str] = []
-        if edition == "final" and meetings[0].readiness != "final_ready":
+        if edition == "final" and meeting.readiness != "final_ready":
             warnings.append("Final report evidence is not yet available")
         if missing_evidence:
             warnings.append(
                 f"{len(missing_evidence)} TDocs do not have evidence and cannot be published"
             )
-        complete = not warnings
+        coverage = (
+            (len(current_tdocs) - len(missing_evidence)) / len(current_tdocs)
+            if current_tdocs
+            else 0
+        )
+        if coverage < self.newsletter_config.minimum_evidence_coverage:
+            warnings.append(
+                f"Evidence coverage {coverage:.3f} is below the configured newsletter threshold"
+            )
+        complete = bool(current_tdocs) and not warnings
         return Envelope(
             data=packet,
             evidence=evidence,
             dataset_version=version,
             completeness="complete" if complete else "partial",
-            confidence=(len(tdocs) - len(missing_evidence)) / len(tdocs) if tdocs else 0,
+            confidence=coverage,
             warnings=warnings,
         )
+
+    async def build_newsletter(
+        self,
+        meeting_id: str,
+        edition: str = "provisional",
+        *,
+        render: bool = False,
+    ) -> Envelope[NewsletterRecord | None]:
+        packet_envelope = await self.newsletter_packet(meeting_id, edition)
+        if packet_envelope.data is None:
+            return Envelope(
+                data=None,
+                evidence=packet_envelope.evidence,
+                dataset_version=packet_envelope.dataset_version,
+                completeness=packet_envelope.completeness,
+                confidence=packet_envelope.confidence,
+                warnings=packet_envelope.warnings,
+            )
+        packet = packet_envelope.data
+        packet_sha = self._newsletter_hash(
+            packet.model_dump(mode="json"), transient={"generated_at"}
+        )
+        record = NewsletterRecord(
+            id=packet.id,
+            dataset_version=packet_envelope.dataset_version,
+            meeting_id=meeting_id,
+            edition=packet.edition,
+            packet=packet,
+            status=NewsletterStatus.PACKET_READY,
+            packet_sha256=packet_sha,
+            created_at=packet.generated_at,
+        )
+        record = await self.repository.save_newsletter(record)
+        if not render:
+            return Envelope(
+                data=record,
+                evidence=packet_envelope.evidence,
+                dataset_version=packet_envelope.dataset_version,
+                completeness=packet_envelope.completeness,
+                confidence=packet_envelope.confidence,
+                warnings=packet_envelope.warnings,
+            )
+        try:
+            rendered = await self.newsletter_renderer.render(packet_envelope)
+        except (ModelEndpointError, ValueError, OSError, TimeoutError) as exc:
+            failed = record.model_copy(
+                update={
+                    "status": NewsletterStatus.GENERATION_FAILED,
+                    "generation_error": str(exc),
+                }
+            )
+            await self.repository.save_newsletter(failed)
+            raise
+        if rendered.data is None:
+            return Envelope(
+                data=record,
+                evidence=packet_envelope.evidence,
+                dataset_version=packet_envelope.dataset_version,
+                completeness="partial",
+                confidence=packet_envelope.confidence,
+                warnings=[*packet_envelope.warnings, *rendered.warnings],
+            )
+        rendered_data = rendered.data.model_dump(mode="json")
+        status = (
+            NewsletterStatus.PENDING_APPROVAL
+            if self.newsletter_config.require_human_approval
+            else NewsletterStatus.APPROVED
+        )
+        generated_record = record.model_copy(
+            update={
+                "rendered": rendered_data,
+                "status": status,
+                "rendered_sha256": self._newsletter_hash(rendered_data),
+                "model": self.generation_client.model_name if self.generation_client else None,
+                "model_revision": (
+                    self.generation_client.revision if self.generation_client else None
+                ),
+                "prompt_version": NEWSLETTER_PROMPT_VERSION,
+                "generation_error": None,
+            }
+        )
+        generated_record = await self.repository.save_newsletter(generated_record)
+        return Envelope(
+            data=generated_record,
+            evidence=packet_envelope.evidence,
+            dataset_version=packet_envelope.dataset_version,
+            confidence=packet_envelope.confidence,
+            warnings=packet_envelope.warnings,
+        )
+
+    async def get_newsletter_record(
+        self,
+        meeting_id: str,
+        edition: str = "provisional",
+        *,
+        approved_only: bool = False,
+    ) -> Envelope[NewsletterRecord | None]:
+        if edition not in {"provisional", "final"}:
+            raise ValueError("edition must be provisional or final")
+        version = await self.repository.active_dataset_version()
+        record = await self.repository.latest_newsletter(
+            meeting_id, edition, approved_only=approved_only
+        )
+        evidence = await self.repository.evidence(record.packet.evidence_ids) if record else []
+        return Envelope(
+            data=record,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if record else "unavailable",
+            confidence=1 if record else 0,
+            warnings=[] if record else [f"No {edition} newsletter exists for {meeting_id}"],
+        )
+
+    async def review_newsletter(
+        self,
+        newsletter_id: str,
+        decision: str,
+        reviewer: str,
+        notes: str = "",
+    ) -> Envelope[NewsletterRecord | None]:
+        if not reviewer.strip():
+            raise ValueError("reviewer is required")
+        try:
+            status = NewsletterStatus(decision)
+        except ValueError as exc:
+            raise ValueError("decision must be approved or rejected") from exc
+        if status not in {NewsletterStatus.APPROVED, NewsletterStatus.REJECTED}:
+            raise ValueError("decision must be approved or rejected")
+        record = await self.repository.review_newsletter(
+            newsletter_id, status, reviewer.strip(), notes.strip()
+        )
+        version = await self.repository.active_dataset_version()
+        evidence = await self.repository.evidence(record.packet.evidence_ids) if record else []
+        return Envelope(
+            data=record,
+            evidence=evidence,
+            dataset_version=version,
+            completeness="complete" if record else "unavailable",
+            confidence=1 if record else 0,
+            warnings=[] if record else [f"Newsletter {newsletter_id} was not found"],
+        )
+
+    @staticmethod
+    def _newsletter_hash(value: dict[str, Any], transient: set[str] | None = None) -> str:
+        canonical = {key: item for key, item in value.items() if key not in (transient or set())}
+        serialized = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(serialized.encode()).hexdigest()

@@ -58,6 +58,13 @@ retrieval:
   rrf_k: 60
   vector_weight: 1.0
   lexical_weight: 1.0
+newsletter:
+  last_k_meetings: 5
+  max_signal_items: 100
+  max_render_evidence_items: 200
+  evidence_excerpt_chars: 1200
+  require_human_approval: true
+  minimum_evidence_coverage: 1.0
 models:
   timeout_seconds: 60
   retries: 2
@@ -94,7 +101,7 @@ models:
   generation:
     provider: openai_compatible
     base_url: null
-    model: null
+    model: Qwen/Qwen3-32B
     api_key: null
 features:
   topic_extraction_enabled: false

@@ -17,7 +17,7 @@ from .domain import SearchFilters, SearchRequest, TemporalScope
 from .fixtures import demo_repository
 from .graph_view import FacetKind
 from .mcp_server import create_mcp_server
-from .models.client import create_embedding_client, create_model_client
+from .models.client import ModelEndpointError, create_embedding_client, create_model_client
 from .repository import SqlRepository
 from .security import OidcAuthMiddleware, OidcTokenValidator, TokenValidator
 from .service import KnowledgeService
@@ -52,6 +52,17 @@ def create_app(
             if settings.models.rerank.base_url and settings.models.rerank.model
             else None
         )
+        generation_client = (
+            create_model_client(
+                settings.models.generation,
+                timeout_seconds=settings.models.timeout_seconds,
+                retries=settings.models.retries,
+            )
+            if settings.features.newsletter_generation_enabled
+            and settings.models.generation.base_url
+            and settings.models.generation.model
+            else None
+        )
         knowledge = KnowledgeService(
             SqlRepository(
                 sessions,
@@ -60,6 +71,9 @@ def create_app(
             ),
             embedding_client,
             rerank_client,
+            newsletter_config=settings.newsletter,
+            generation_client=generation_client,
+            features=settings.features,
         )
     else:
         knowledge = KnowledgeService(demo_repository())
@@ -107,9 +121,7 @@ def create_app(
             raise HTTPException(
                 status_code=413,
                 detail={
-                    "message": (
-                        f"complete {limit_name} graph exceeds configured safety limits"
-                    ),
+                    "message": (f"complete {limit_name} graph exceeds configured safety limits"),
                     "counts": counts,
                     "max_nodes": max_nodes,
                     "max_edges": max_edges,
@@ -317,13 +329,7 @@ def create_app(
                 )
             )
             tdocs = [tdoc for page in pages for tdoc in page.data]
-            evidence = list(
-                {
-                    item.id: item
-                    for page in pages
-                    for item in page.evidence
-                }.values()
-            )
+            evidence = list({item.id: item for page in pages for item in page.evidence}.values())
             dataset_version = meetings.dataset_version
             next_cursor = None
         else:
@@ -429,6 +435,50 @@ def create_app(
         result = await knowledge.newsletter_packet(meeting_id, edition)
         if result.data is None:
             raise HTTPException(status_code=404, detail=f"Meeting {meeting_id} was not found")
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.get("/api/newsletters/{meeting_id}/record")
+    async def newsletter_record(
+        meeting_id: str,
+        edition: str = "provisional",
+        approved_only: bool = False,
+    ) -> JSONResponse:
+        result = await knowledge.get_newsletter_record(
+            meeting_id, edition, approved_only=approved_only
+        )
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=result.warnings[0])
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.post("/api/newsletters/{meeting_id}/generate")
+    async def generate_newsletter(
+        meeting_id: str,
+        edition: str = "provisional",
+        render: bool = False,
+    ) -> JSONResponse:
+        try:
+            result = await knowledge.build_newsletter(meeting_id, edition, render=render)
+        except ModelEndpointError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=result.warnings[0])
+        return JSONResponse(result.model_dump(mode="json"))
+
+    @app.post("/api/newsletter-reviews/{newsletter_id}")
+    async def review_newsletter(
+        newsletter_id: str,
+        decision: str,
+        reviewer: str,
+        notes: str = "",
+    ) -> JSONResponse:
+        try:
+            result = await knowledge.review_newsletter(newsletter_id, decision, reviewer, notes)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if result.data is None:
+            raise HTTPException(status_code=404, detail=result.warnings[0])
         return JSONResponse(result.model_dump(mode="json"))
 
     app.router.routes.append(Mount("/mcp", app=mcp.streamable_http_app()))

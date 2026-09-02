@@ -37,6 +37,8 @@ async def test_all_required_mcp_tools_are_registered(service) -> None:
         "compare_meetings",
         "get_spec_changes",
         "get_newsletter",
+        "get_newsletter_packet",
+        "get_published_newsletter",
     }
 
 
@@ -61,6 +63,11 @@ async def test_every_mcp_tool_executes_with_evidence_envelope(service) -> None:
         "get_meeting_decisions": {"meeting_id": "RAN2-133"},
         "get_meeting_brief": {"meeting_id": "RAN2-133"},
         "get_newsletter": {"meeting_id": "RAN2-133", "edition": "final"},
+        "get_newsletter_packet": {"meeting_id": "RAN2-133", "edition": "final"},
+        "get_published_newsletter": {
+            "meeting_id": "RAN2-133",
+            "edition": "final",
+        },
         "search_topics": {"query": "Carrier aggregation", "meeting_ids": ["RAN2-133"]},
         "trace_topic": {"topic": "Carrier aggregation", "meeting_ids": ["RAN2-133"]},
         "get_hot_topics": {"meeting_id": "RAN2-133"},

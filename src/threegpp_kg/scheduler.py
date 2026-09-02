@@ -8,6 +8,8 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from .constants import NEWSLETTER_PACKET_VERSION, MeetingReadiness
+from .domain import Meeting
 from .storage.database import JobRow
 
 TERMINAL_JOB_STATES = frozenset({"complete", "dead_letter"})
@@ -99,6 +101,41 @@ async def enqueue_job(
     session.add(row)
     await session.flush()
     return row
+
+
+async def enqueue_newsletter_jobs(
+    session: AsyncSession,
+    *,
+    dataset_version: str,
+    meeting: Meeting,
+) -> list[JobRow]:
+    readiness = MeetingReadiness(meeting.readiness)
+    if readiness not in {
+        MeetingReadiness.PROVISIONAL_READY,
+        MeetingReadiness.FINAL_READY,
+    }:
+        return []
+    editions = ["provisional"]
+    if readiness == MeetingReadiness.FINAL_READY:
+        editions.append("final")
+    rows = []
+    for edition in editions:
+        key = f"newsletter:{NEWSLETTER_PACKET_VERSION}:{dataset_version}:{meeting.id}:{edition}"
+        rows.append(
+            await enqueue_job(
+                session,
+                job_id=key,
+                job_type="build_newsletter",
+                idempotency_key=key,
+                payload={
+                    "dataset_version": dataset_version,
+                    "meeting_id": meeting.id,
+                    "edition": edition,
+                    "render": False,
+                },
+            )
+        )
+    return rows
 
 
 async def lease_next_job(

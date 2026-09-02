@@ -6,7 +6,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Iterable
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol, TypeVar
 
 from pgvector.sqlalchemy import Vector
@@ -15,13 +15,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
 from .config import RetrievalConfig
-from .constants import AUTHORITY_RANK, BlockKind, Conclusion, EvidenceAuthority, MatchMode
+from .constants import (
+    AUTHORITY_RANK,
+    BlockKind,
+    Conclusion,
+    EvidenceAuthority,
+    MatchMode,
+    NewsletterStatus,
+)
 from .domain import (
     DocumentBlock,
     DocumentSectionNode,
     EmbeddingProfileInfo,
     EvidenceRef,
     Meeting,
+    NewsletterRecord,
     Passage,
     RetrievalChunk,
     SearchFilters,
@@ -37,6 +45,7 @@ from .storage.database import (
     EmbeddingProfileRow,
     EvidenceRow,
     MeetingRow,
+    NewsletterRow,
     RetrievalChunkRow,
     TDocRow,
 )
@@ -60,6 +69,23 @@ class Repository(Protocol):
     async def meeting_tdocs(self, meeting_id: str) -> list[TDoc]: ...
 
     async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]: ...
+
+    async def latest_newsletter(
+        self,
+        meeting_id: str,
+        edition: str,
+        *,
+        approved_only: bool = False,
+        across_datasets: bool = False,
+    ) -> NewsletterRecord | None: ...
+
+    async def newsletter_by_id(self, newsletter_id: str) -> NewsletterRecord | None: ...
+
+    async def save_newsletter(self, record: NewsletterRecord) -> NewsletterRecord: ...
+
+    async def review_newsletter(
+        self, newsletter_id: str, status: NewsletterStatus, reviewer: str, notes: str
+    ) -> NewsletterRecord | None: ...
 
     async def get_tdoc(self, tdoc_id: str) -> TDoc | None: ...
 
@@ -397,6 +423,114 @@ class SqlRepository:
             ).all()
         return {meeting_id: int(count) for meeting_id, count in rows}
 
+    async def latest_newsletter(
+        self,
+        meeting_id: str,
+        edition: str,
+        *,
+        approved_only: bool = False,
+        across_datasets: bool = False,
+    ) -> NewsletterRecord | None:
+        version = await self.active_dataset_version()
+        filters = [
+            func.lower(NewsletterRow.meeting_id) == meeting_id.lower(),
+            NewsletterRow.edition == edition,
+        ]
+        if not across_datasets:
+            filters.append(NewsletterRow.dataset_version_id == version)
+        if approved_only:
+            filters.append(NewsletterRow.status == NewsletterStatus.APPROVED.value)
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(NewsletterRow)
+                .where(and_(*filters))
+                .order_by(desc(NewsletterRow.created_at), desc(NewsletterRow.id))
+                .limit(1)
+            )
+        return self._newsletter(row) if row else None
+
+    async def newsletter_by_id(self, newsletter_id: str) -> NewsletterRecord | None:
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(NewsletterRow).where(
+                    NewsletterRow.dataset_version_id == version,
+                    NewsletterRow.id == newsletter_id,
+                )
+            )
+        return self._newsletter(row) if row else None
+
+    async def save_newsletter(self, record: NewsletterRecord) -> NewsletterRecord:
+        async with self.sessions() as session:
+            row = await session.get(NewsletterRow, record.id)
+            if row is None:
+                row = NewsletterRow(
+                    id=record.id,
+                    dataset_version_id=record.dataset_version,
+                    meeting_id=record.meeting_id,
+                    edition=record.edition,
+                    packet=record.packet.model_dump(mode="json"),
+                    rendered=record.rendered,
+                    evidence_ids=record.packet.evidence_ids,
+                    status=record.status.value,
+                    packet_sha256=record.packet_sha256,
+                    rendered_sha256=record.rendered_sha256,
+                    model=record.model,
+                    model_revision=record.model_revision,
+                    prompt_version=record.prompt_version,
+                    generation_error=record.generation_error,
+                    created_at=record.created_at,
+                )
+                session.add(row)
+            else:
+                if row.packet_sha256 != record.packet_sha256:
+                    raise ValueError("immutable newsletter packet content cannot be replaced")
+                if (
+                    record.rendered_sha256
+                    and row.rendered_sha256
+                    and row.rendered_sha256 != record.rendered_sha256
+                ):
+                    raise ValueError("immutable rendered newsletter content cannot be replaced")
+                if row.rendered is None and record.rendered is not None:
+                    row.rendered = record.rendered
+                    row.rendered_sha256 = record.rendered_sha256
+                    row.model = record.model
+                    row.model_revision = record.model_revision
+                    row.prompt_version = record.prompt_version
+                    row.generation_error = None
+                    row.status = record.status.value
+                elif record.status == NewsletterStatus.GENERATION_FAILED:
+                    row.status = record.status.value
+                    row.generation_error = record.generation_error
+            await session.commit()
+            await session.refresh(row)
+        return self._newsletter(row)
+
+    async def review_newsletter(
+        self, newsletter_id: str, status: NewsletterStatus, reviewer: str, notes: str
+    ) -> NewsletterRecord | None:
+        if status not in {NewsletterStatus.APPROVED, NewsletterStatus.REJECTED}:
+            raise ValueError("review status must be approved or rejected")
+        version = await self.active_dataset_version()
+        async with self.sessions() as session:
+            row = await session.scalar(
+                select(NewsletterRow).where(
+                    NewsletterRow.dataset_version_id == version,
+                    NewsletterRow.id == newsletter_id,
+                )
+            )
+            if row is None:
+                return None
+            if row.rendered is None:
+                raise ValueError("a newsletter without rendered prose cannot be reviewed")
+            row.status = status.value
+            row.reviewed_at = datetime.now(UTC)
+            row.reviewed_by = reviewer
+            row.review_notes = notes
+            await session.commit()
+            await session.refresh(row)
+        return self._newsletter(row)
+
     async def get_tdoc(self, tdoc_id: str) -> TDoc | None:
         version = await self.active_dataset_version()
         async with self.sessions() as session:
@@ -710,6 +844,28 @@ class SqlRepository:
             evidence_ids=row.evidence_ids or [],
         )
 
+    @staticmethod
+    def _newsletter(row: NewsletterRow) -> NewsletterRecord:
+        return NewsletterRecord(
+            id=row.id,
+            dataset_version=row.dataset_version_id,
+            meeting_id=row.meeting_id,
+            edition=row.edition,
+            packet=row.packet,
+            rendered=row.rendered,
+            status=NewsletterStatus(row.status),
+            packet_sha256=row.packet_sha256,
+            rendered_sha256=row.rendered_sha256,
+            model=row.model,
+            model_revision=row.model_revision,
+            prompt_version=row.prompt_version,
+            generation_error=row.generation_error,
+            created_at=row.created_at,
+            reviewed_at=row.reviewed_at,
+            reviewed_by=row.reviewed_by,
+            review_notes=row.review_notes,
+        )
+
 
 class InMemoryRepository:
     def __init__(
@@ -727,6 +883,7 @@ class InMemoryRepository:
         self.chunks = chunks or []
         self.blocks = blocks or []
         self.dataset_version = dataset_version
+        self.newsletters: dict[str, NewsletterRecord] = {}
 
     async def active_dataset_version(self) -> str:
         return self.dataset_version
@@ -839,6 +996,80 @@ class InMemoryRepository:
     async def meeting_tdoc_counts(self, meeting_ids: list[str]) -> dict[str, int]:
         selected = set(meeting_ids)
         return dict(Counter(item.meeting_id for item in self.tdocs if item.meeting_id in selected))
+
+    async def latest_newsletter(
+        self,
+        meeting_id: str,
+        edition: str,
+        *,
+        approved_only: bool = False,
+        across_datasets: bool = False,
+    ) -> NewsletterRecord | None:
+        del across_datasets
+        values = [
+            item
+            for item in self.newsletters.values()
+            if item.meeting_id.casefold() == meeting_id.casefold()
+            and item.edition == edition
+            and (not approved_only or item.status == NewsletterStatus.APPROVED)
+        ]
+        return max(values, key=lambda item: (item.created_at, item.id), default=None)
+
+    async def newsletter_by_id(self, newsletter_id: str) -> NewsletterRecord | None:
+        return self.newsletters.get(newsletter_id)
+
+    async def save_newsletter(self, record: NewsletterRecord) -> NewsletterRecord:
+        existing = self.newsletters.get(record.id)
+        if existing and existing.packet_sha256 != record.packet_sha256:
+            raise ValueError("immutable newsletter packet content cannot be replaced")
+        if (
+            existing
+            and record.rendered_sha256
+            and existing.rendered_sha256
+            and existing.rendered_sha256 != record.rendered_sha256
+        ):
+            raise ValueError("immutable rendered newsletter content cannot be replaced")
+        if (
+            existing
+            and existing.rendered is not None
+            and record.rendered is None
+            and record.status != NewsletterStatus.GENERATION_FAILED
+        ):
+            return existing
+        if existing and existing.rendered is None and record.rendered is None:
+            if record.status == NewsletterStatus.GENERATION_FAILED:
+                updated = existing.model_copy(
+                    update={
+                        "status": record.status,
+                        "generation_error": record.generation_error,
+                    }
+                )
+                self.newsletters[record.id] = updated
+                return updated
+            return existing
+        self.newsletters[record.id] = record
+        return record
+
+    async def review_newsletter(
+        self, newsletter_id: str, status: NewsletterStatus, reviewer: str, notes: str
+    ) -> NewsletterRecord | None:
+        if status not in {NewsletterStatus.APPROVED, NewsletterStatus.REJECTED}:
+            raise ValueError("review status must be approved or rejected")
+        record = self.newsletters.get(newsletter_id)
+        if record is None:
+            return None
+        if record.rendered is None:
+            raise ValueError("a newsletter without rendered prose cannot be reviewed")
+        updated = record.model_copy(
+            update={
+                "status": status,
+                "reviewed_at": datetime.now(UTC),
+                "reviewed_by": reviewer,
+                "review_notes": notes,
+            }
+        )
+        self.newsletters[newsletter_id] = updated
+        return updated
 
     def _temporal_meeting_ids(self, filters: SearchFilters) -> set[str] | None:
         search_filters = filters

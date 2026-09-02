@@ -145,6 +145,46 @@ for compact, human-readable citations; independent 300-700-token retrieval chunk
 quality. Headings become a deterministic document-section tree rather than duplicate body rows.
 See `docs/evidence-policy.md`.
 
+## WG Analytical Newsletters
+
+Newsletter processing has two independent stages. The deterministic stage scans every TDoc in a
+meeting, compares the previous five meetings in the same WG, scores material signals, and persists
+an immutable evidence packet. It does not require an LLM. Optional prose rendering sends only the
+bounded, versioned packet to the configured OpenAI-compatible Qwen endpoint and validates every
+paragraph against packet evidence before retaining it for human approval.
+
+```bash
+export THREEGPP_DATABASE_MODE=sql
+export THREEGPP_DATABASE_URL=postgresql+asyncpg://localhost:5432/threegpp
+uv run alembic upgrade head
+
+# Build and persist a provisional evidence packet without an LLM.
+uv run threegpp-kg build-newsletter \
+  --meeting RAN2-135 \
+  --edition provisional \
+  --last-k-meetings 5 \
+  --output artifacts/ran2-135-newsletter-packet.json
+
+# Render only after configuring and enabling the generation endpoint.
+THREEGPP_NEWSLETTER_GENERATION_ENABLED=true \
+THREEGPP_GENERATION_BASE_URL=https://internal.example/v1 \
+THREEGPP_GENERATION_API_KEY=redacted \
+  uv run threegpp-kg build-newsletter \
+    --meeting RAN2-135 --edition provisional --render
+
+uv run threegpp-kg review-newsletter \
+  --newsletter-id <newsletter-id> \
+  --decision approve \
+  --reviewer <reviewer-id>
+```
+
+The API exposes packet generation, immutable records, and review at
+`/api/newsletters/{meeting_id}`, `/api/newsletters/{meeting_id}/generate`,
+`/api/newsletters/{meeting_id}/record`, and `/api/newsletter-reviews/{newsletter_id}`. MCP clients
+can use `get_newsletter`, `get_newsletter_packet`, and `get_published_newsletter`. A final edition is
+separate from the provisional edition and includes an evidence-backed provisional-to-final delta.
+See `docs/wg-newsletter-roadmap.md` for the packet contract and current release gates.
+
 ## Latest-Five Local Corpus
 
 The current local candidate contains five substantive meetings each for CT1, RAN2, RAN3, and SA2.
@@ -194,5 +234,6 @@ source has no published report for CT1-162 or RAN3-133. See the reconciliation a
 
 ## Readiness
 
-See `docs/system-verification-report.md`. Newsletter prose generation remains disabled until a
-configured live model passes its release gate; deterministic newsletter packets remain available.
+See `docs/system-verification-report.md`. Deterministic newsletter packets are available with
+documented limitations. Newsletter prose generation remains disabled and not production-ready until
+a configured live Qwen model and human domain-review gate pass.
